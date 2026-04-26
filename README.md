@@ -1,31 +1,45 @@
-# code-agent-sdk
+# Code Agent SDK
 
-TypeScript SDK playground for a multi-model coding orchestration system.
+Experimental TypeScript SDK for orchestrating coding work across multiple model tiers and agent roles.
 
-## Run the demo
+The core idea is to treat a coding request as a planned workflow instead of a single model call:
+
+1. a planner turns the user message into a `TaskDAG`
+2. Spark workers implement small pure functions and pure components in parallel
+3. mini workers compose layout-level pieces
+4. GPT-5.5 workers handle screen-level or cross-cutting logic
+5. a merge broker validates patches before applying them
+6. verifiers and reviewers check the final result without directly editing source
+
+This project is early-stage infrastructure. The mock runner is useful for local validation, while the adapter boundary is designed for real Codex SDK or OpenAI API integration.
+
+## Install
 
 ```sh
-npm run agent:demo
+npm install @stevelife/code-agent-sdk
 ```
 
-The demo builds the project, creates a mock `ProjectSpace` rooted at the current directory, asks the mock planner for a TaskDAG, runs Spark component workers in parallel workspaces, merges mock patches through `MergeBroker`, runs mock verification, and aggregates four mock review agents.
+Node.js 18 or newer is required.
 
-## Use the SDK on a repo
+## Quick Start
 
 ```ts
-import { test } from "code-agent-sdk";
+import { runCodingTask } from "@stevelife/code-agent-sdk";
 
-const result = await test(
+const result = await runCodingTask(
   "Build a playable snake game. Put pure game logic in small functions.",
   "/path/to/target-repo",
   "main",
 );
+
+console.log(result.status);
+console.log(result.summary);
 ```
 
-For a client that needs to render the full thread process, use the streamed API:
+For UIs that need to render the orchestration process, use the streamed API:
 
 ```ts
-import { runCodingTaskStreamed } from "code-agent-sdk";
+import { runCodingTaskStreamed } from "@stevelife/code-agent-sdk";
 
 const stream = await runCodingTaskStreamed(
   "Build a playable snake game. Put pure game logic in small functions.",
@@ -43,49 +57,120 @@ const result = await stream.result;
 console.log(result.modelUsage);
 ```
 
-`test()` now runs the orchestrated path:
-
-- planner model creates a `TaskDAG`
-- the planner assigns each task a concrete `model` string
-- implementation tasks run in dependency-ready batches inside isolated git worktrees
-- worker changes return as patches
-- `MergeBroker` validates and applies patches
-- verifier and reviewer tasks run after merge
-- every Codex-backed thread emits `thread.event` items with the raw SDK event
-- final results include replayable `trace` and `modelUsage`
-
 For a direct single-thread Codex baseline, use `runSingleCodexTask()`.
 
-## Run tests
+## Orchestration Model
+
+The SDK separates responsibility by role:
+
+| Role | Default tier | Responsibility |
+| --- | --- | --- |
+| `planner` | GPT-5.5 xhigh | Understand the requirement, produce `TaskDAG`, contracts, ownership, and review plan |
+| `component-worker` | Spark | Implement low-risk pure functions, pure components, validators, formatters, and mappers |
+| `layout-worker` | mini | Compose cards, grids, drawers, dialogs, loading, empty, and error UI |
+| `screen-worker` | GPT-5.5 high/medium | Implement screen logic, state coordination, routing, permissions, and data loading |
+| `reviewer` | GPT-5.5 high/xhigh | Review code and reports without directly modifying source |
+| `verifier` | program | Run lint, typecheck, tests, builds, and smoke checks |
+| `merge-broker` | program | Validate, merge, and verify worker patches |
+
+Workers never edit the main project root directly. Implementation workers run in isolated workspaces or git worktrees, emit patches, and let `MergeBroker` validate and apply those patches.
+
+## Permission Model
+
+Permissions are derived from:
+
+```txt
+AgentRole + ProjectSpace + TaskScope
+```
+
+There is no `projectType` switch. File access is path-scoped and every path is checked against `ProjectSpace.root`.
+
+Network permissions are modeled separately:
+
+- `shellNetwork`: command-level network access such as `curl`, `npm install`, `git clone`, `wget`
+- `webSearch`: controlled web search or documentation lookup
+- `mcpRead`: read-only MCP access such as GitHub, Slack, Jira, or docs
+- `mcpWrite`: side-effecting MCP access such as PR creation, issue updates, or messages
+
+Only `shellNetwork` maps to Codex sandbox network access. Tool permissions such as `webSearch`, `mcpRead`, and `mcpWrite` stay at the orchestration layer.
+
+## Local Demo
+
+```sh
+npm run agent:demo
+```
+
+The demo:
+
+- creates a `ProjectSpace` rooted at the current project
+- asks the mock planner for a task-card `TaskDAG`
+- runs Spark component tasks in parallel
+- generates mock patches
+- validates paths through `MergeBroker`
+- runs mock verification
+- aggregates contract, integration, architecture, and security review reports
+
+## Test
 
 ```sh
 npm test
 ```
 
-## Current architecture
+## Public API
 
-- `planner`: GPT-5.5 xhigh contract, mocked by `MockModelRunner.runPlanner`.
-- `component-worker`: Spark contract for small pure components/functions, parallelized by `SparkWorkerPool`.
-- `layout-worker`: mini contract for layout composition.
-- `screen-worker`: GPT-5.5 high/medium contract for screen orchestration.
-- `reviewer`: read-only structured reviewers for contract, integration, architecture, and security checks.
-- `verifier` and `merge-broker`: programmatic agents.
+Common entry points:
 
-Permissions are derived from `AgentRole + ProjectSpace + TaskScope`. Network is split into `shellNetwork`, `webSearch`, `mcpRead`, and `mcpWrite`; only `shellNetwork` maps to Codex workspace network access.
+- `runCodingTask(message, repo, branch, options?)`
+- `runCodingTaskStreamed(message, repo, branch, options?)`
+- `test(message, repo, branch, options?)`
+- `runSingleCodexTask(message, repo, branch)`
+- `AgentOrchestrator`
+- `MockModelRunner`
+- `CodexModelRunnerAdapter`
+- `WorkspaceManager`
+- `MergeBroker`
+- `ReviewAggregator`
+- `createCodexOptions`
 
-## Mocked parts
+The package also exports core types such as `TaskContract`, `TaskDAG`, `ProjectSpace`, `TaskScope`, `WorkerResult`, `ReviewResult`, and `OrchestrationResult`.
 
-- Model calls are mocked by `MockModelRunner`.
-- Worker code changes are represented as JSON mock patches.
-- Workspace creation uses isolated directories under `.agent-orchestrator` instead of real git worktrees.
-- Verifier commands default to mock pass unless `executeVerificationCommands` is enabled.
+## Real Model Integration
 
-## Real adapter path
+The adapter boundary is `ModelRunner`:
 
-Use `CodexModelRunnerAdapter` as the adapter boundary for Codex SDK/OpenAI API:
+```ts
+export interface ModelRunner {
+  runPlanner(requirement: string, context?: ModelRunnerPlannerContext): Promise<TaskDAG>;
+  runWorker(input: ModelRunnerWorkerInput): Promise<ModelRunnerWorkerOutput>;
+  runReviewer(input: ModelRunnerReviewerInput): Promise<ReviewResult>;
+}
+```
 
-- `runPlanner` turns the requirement into a structured `TaskDAG`.
-- `runWorker` runs the assigned task inside its isolated workspace and returns a patch path.
-- `runReviewer` returns a structured `ReviewResult`.
-- The mock runner still uses JSON mock patches for local tests and `agent:demo`; the Codex adapter uses real git diffs from isolated worktrees.
-- Keep `MergeBroker` as the only path that applies patches to the main project root.
+Use `CodexModelRunnerAdapter` for real Codex SDK execution. The mock runner still uses JSON patch fixtures for deterministic tests and demos; real adapters should run in isolated workspaces and return real patch paths.
+
+## Current Mocked Parts
+
+- `MockModelRunner` returns a fixed task-card `TaskDAG`.
+- Mock workers can return JSON patch files instead of real model edits.
+- Workspace management supports mock copy mode and a git-worktree strategy boundary.
+- Verification commands can be mocked unless `executeVerificationCommands` is enabled.
+- Review workers return structured mock review reports unless backed by a real `ModelRunner`.
+
+## Development
+
+```sh
+npm install
+npm test
+npm run agent:demo
+```
+
+Before publishing:
+
+```sh
+npm run build
+npm pack --dry-run
+```
+
+## License
+
+MIT

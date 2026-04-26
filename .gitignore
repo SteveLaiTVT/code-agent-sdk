@@ -1,6 +1,7 @@
 node_modules
 dist
 *.tsbuildinfo
+.DS_Store
 .idea
 .agent-orchestrator
 src/examples/generated-task-board
