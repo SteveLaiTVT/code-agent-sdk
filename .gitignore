@@ -1,0 +1,6 @@
+node_modules
+dist
+*.tsbuildinfo
+.idea
+.agent-orchestrator
+src/examples/generated-task-board
