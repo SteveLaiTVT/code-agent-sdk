@@ -1,9 +1,25 @@
 {
-  "name": "code-agent-sdk",
+  "name": "@stevelife/code-agent-sdk",
   "version": "0.0.1",
-  "description": "Using Codex-sdk agent, and make component develop deeply;",
-  "license": "ISC",
-  "author": "",
+  "description": "Experimental multi-agent Codex orchestration SDK for coding workflows.",
+  "license": "MIT",
+  "author": "SteveLaiTVT",
+  "keywords": [
+    "codex",
+    "agent",
+    "multi-agent",
+    "orchestration",
+    "sdk",
+    "coding-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SteveLaiTVT/code-agent-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SteveLaiTVT/code-agent-sdk/issues"
+  },
+  "homepage": "https://github.com/SteveLaiTVT/code-agent-sdk#readme",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,6 +34,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=18"
   },
