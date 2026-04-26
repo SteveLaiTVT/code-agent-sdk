@@ -10,6 +10,30 @@ npm run agent:demo
 
 The demo builds the project, creates a mock `ProjectSpace` rooted at the current directory, asks the mock planner for a TaskDAG, runs Spark component workers in parallel workspaces, merges mock patches through `MergeBroker`, runs mock verification, and aggregates four mock review agents.
 
+## Use the SDK on a repo
+
+```ts
+import { test } from "code-agent-sdk";
+
+const result = await test(
+  "Build a playable snake game. Put pure game logic in small functions.",
+  "/path/to/target-repo",
+  "main",
+);
+```
+
+`test()` now runs the orchestrated path:
+
+- planner model creates a `TaskDAG`
+- `component-worker` tasks run with the Spark model in isolated git worktrees
+- `layout-worker` tasks run with the mini model
+- `screen-worker` tasks run with GPT-5.5
+- worker changes return as patches
+- `MergeBroker` validates and applies patches
+- verifier and reviewer tasks run after merge
+
+For a direct single-thread Codex baseline, use `runSingleCodexTask()`.
+
 ## Run tests
 
 ```sh
@@ -38,7 +62,8 @@ Permissions are derived from `AgentRole + ProjectSpace + TaskScope`. Network is 
 
 Use `CodexModelRunnerAdapter` as the adapter boundary for Codex SDK/OpenAI API:
 
-- `runPlanner` should turn the requirement into a validated `TaskDAG`.
-- `runWorker` should run the assigned task inside its isolated workspace.
-- `runReviewer` should return a structured `ReviewResult`.
-- Replace mock patch generation with real workspace diff generation while keeping `MergeBroker` as the only path that applies patches to the main project root.
+- `runPlanner` turns the requirement into a structured `TaskDAG`.
+- `runWorker` runs the assigned task inside its isolated workspace and returns a patch path.
+- `runReviewer` returns a structured `ReviewResult`.
+- The mock runner still uses JSON mock patches for local tests and `agent:demo`; the Codex adapter uses real git diffs from isolated worktrees.
+- Keep `MergeBroker` as the only path that applies patches to the main project root.
