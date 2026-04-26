@@ -22,15 +22,37 @@ const result = await test(
 );
 ```
 
+For a client that needs to render the full thread process, use the streamed API:
+
+```ts
+import { runCodingTaskStreamed } from "code-agent-sdk";
+
+const stream = await runCodingTaskStreamed(
+  "Build a playable snake game. Put pure game logic in small functions.",
+  "/path/to/target-repo",
+  "main",
+);
+
+for await (const event of stream.events) {
+  if (event.type === "thread.event") {
+    console.log(event.threadRunId, event.model, event.sdkEvent);
+  }
+}
+
+const result = await stream.result;
+console.log(result.modelUsage);
+```
+
 `test()` now runs the orchestrated path:
 
 - planner model creates a `TaskDAG`
-- `component-worker` tasks run with the Spark model in isolated git worktrees
-- `layout-worker` tasks run with the mini model
-- `screen-worker` tasks run with GPT-5.5
+- the planner assigns each task a concrete `model` string
+- implementation tasks run in dependency-ready batches inside isolated git worktrees
 - worker changes return as patches
 - `MergeBroker` validates and applies patches
 - verifier and reviewer tasks run after merge
+- every Codex-backed thread emits `thread.event` items with the raw SDK event
+- final results include replayable `trace` and `modelUsage`
 
 For a direct single-thread Codex baseline, use `runSingleCodexTask()`.
 

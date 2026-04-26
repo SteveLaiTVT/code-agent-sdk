@@ -7,6 +7,7 @@ function makeTask(taskId, overrides = {}) {
     taskId,
     title: taskId,
     role: "component-worker",
+    model: "test-model",
     modelTier: "spark",
     reasoningEffort: "low",
     objective: taskId,
@@ -26,6 +27,7 @@ function normalDag() {
     makeTask("component-a"),
     makeTask("layout", {
       role: "layout-worker",
+      model: "layout-model",
       modelTier: "mini",
       reasoningEffort: "medium",
       dependencies: ["component-a"],
@@ -33,6 +35,7 @@ function normalDag() {
     }),
     makeTask("screen", {
       role: "screen-worker",
+      model: "screen-model",
       modelTier: "gpt-5.5",
       reasoningEffort: "high",
       dependencies: ["layout"],
@@ -41,6 +44,7 @@ function normalDag() {
   ];
   const reviewer = makeTask("review", {
     role: "reviewer",
+    model: "review-model",
     modelTier: "gpt-5.5",
     reasoningEffort: "high",
     writePaths: [],

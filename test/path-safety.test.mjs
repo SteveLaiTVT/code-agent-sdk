@@ -10,6 +10,7 @@ function task(overrides = {}) {
     taskId: "task",
     title: "Task",
     role: "component-worker",
+    model: "test-model",
     modelTier: "spark",
     reasoningEffort: "low",
     objective: "test",

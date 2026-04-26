@@ -11,6 +11,7 @@ function task(taskId) {
     taskId,
     title: taskId,
     role: "component-worker",
+    model: "test-model",
     modelTier: "spark",
     reasoningEffort: "low",
     objective: taskId,
