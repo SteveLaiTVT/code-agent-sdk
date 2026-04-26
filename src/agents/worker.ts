@@ -61,7 +61,7 @@ abstract class BasePatchWorker implements AgentWorker {
         task,
         workspacePath: context.workspacePath,
       });
-      const patchPath = await createMockPatchFile(context.workspacePath, task);
+      const patchPath = output.patchPath ?? (await createMockPatchFile(context.workspacePath, task));
       return {
         taskId: task.taskId,
         workerId: this.workerId,

@@ -54,7 +54,13 @@ export class ReviewWorker implements AgentWorker {
     verification?: VerificationResult
   ): Promise<ReviewResult> {
     const reviewType = this.reviewType ?? getReviewTypeFromTask(task);
-    const result = await this.modelRunner.runReviewer({ task, reviewType, verification });
+    const result = await this.modelRunner.runReviewer({
+      task,
+      reviewType,
+      verification,
+      project: context.project,
+      workspacePath: context.workspacePath,
+    });
     const reportDir = path.join(context.workspacePath, ".agent-orchestrator", "reviews");
     await mkdir(reportDir, { recursive: true });
     await writeFile(

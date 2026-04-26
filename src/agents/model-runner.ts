@@ -1,5 +1,5 @@
 import type { ReviewResult } from "../review/review-types.js";
-import type { TaskContract, TaskDAG, VerificationResult } from "../core/types.js";
+import type { ProjectSpace, TaskContract, TaskDAG, VerificationResult } from "../core/types.js";
 
 export interface ModelRunnerWorkerInput {
   task: TaskContract;
@@ -10,16 +10,23 @@ export interface ModelRunnerWorkerOutput {
   summary: string;
   changedFiles: string[];
   logs: string[];
+  patchPath?: string;
 }
 
 export interface ModelRunnerReviewerInput {
   task: TaskContract;
   reviewType: ReviewResult["reviewType"];
+  project?: ProjectSpace;
+  workspacePath?: string;
   verification?: VerificationResult;
 }
 
+export interface ModelRunnerPlannerContext {
+  project?: ProjectSpace;
+}
+
 export interface ModelRunner {
-  runPlanner(requirement: string): Promise<TaskDAG>;
+  runPlanner(requirement: string, context?: ModelRunnerPlannerContext): Promise<TaskDAG>;
   runWorker(input: ModelRunnerWorkerInput): Promise<ModelRunnerWorkerOutput>;
   runReviewer(input: ModelRunnerReviewerInput): Promise<ReviewResult>;
 }

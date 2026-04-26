@@ -51,10 +51,7 @@ export class AgentOrchestrator {
     this.maxMiniWorkers = options.maxMiniWorkers ?? 2;
     this.maxGpt55Workers = options.maxGpt55Workers ?? 1;
     this.executeVerificationCommands = options.executeVerificationCommands ?? false;
-    this.fullVerificationCommands = options.fullVerificationCommands ?? [
-      "npm run build",
-      "npm test",
-    ];
+    this.fullVerificationCommands = options.fullVerificationCommands ?? [];
   }
 
   async run(requirement: string, project: ProjectSpace): Promise<OrchestrationResult> {
@@ -65,7 +62,7 @@ export class AgentOrchestrator {
 
     let dag: TaskDAG;
     try {
-      dag = await this.modelRunner.runPlanner(requirement);
+      dag = await this.modelRunner.runPlanner(requirement, { project });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -135,12 +132,17 @@ export class AgentOrchestrator {
       return this.failedAfterMerge(dag, taskResults, mergeResults, verificationResults, reviewResults);
     }
 
-    const partialVerification = await this.runVerification(
-      project,
-      ["npm run build"],
-      "partial-verifier"
+    const partialVerificationCommands = uniqueCommands(
+      componentTasks.flatMap((task) => task.verificationCommands)
     );
-    verificationResults.push(partialVerification);
+    if (partialVerificationCommands.length > 0) {
+      const partialVerification = await this.runVerification(
+        project,
+        partialVerificationCommands,
+        "partial-verifier"
+      );
+      verificationResults.push(partialVerification);
+    }
 
     const layoutResults = await this.runWorkerStage(
       project,
@@ -204,12 +206,14 @@ export class AgentOrchestrator {
       }
     }
 
-    const fullVerification = await this.runVerification(
-      project,
-      this.fullVerificationCommands,
-      "full-chain-verifier"
-    );
-    verificationResults.push(fullVerification);
+    if (this.fullVerificationCommands.length > 0) {
+      const fullVerification = await this.runVerification(
+        project,
+        this.fullVerificationCommands,
+        "full-chain-verifier"
+      );
+      verificationResults.push(fullVerification);
+    }
     if (verificationResults.some((result) => result.status === "failed")) {
       return {
         status: "failed",
@@ -341,4 +345,8 @@ export class AgentOrchestrator {
       summary: "Merge broker rejected or failed one or more worker patches.",
     };
   }
+}
+
+function uniqueCommands(commands: string[]): string[] {
+  return [...new Set(commands.map((command) => command.trim()).filter(Boolean))];
 }

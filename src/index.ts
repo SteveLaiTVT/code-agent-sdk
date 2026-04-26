@@ -1,10 +1,62 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Codex, type RunResult } from "@openai/codex-sdk";
+import path from "node:path";
+import { AgentOrchestrator, type AgentOrchestratorOptions } from "./agents/orchestrator.js";
+import {
+  CodexModelRunnerAdapter,
+  type CodexModelRunnerAdapterConfig,
+} from "./adapters/codex-model-runner.js";
+import type { OrchestrationResult, ProjectSpace } from "./core/types.js";
+import { WorkspaceManager } from "./workspace/workspace-manager.js";
+import { MergeBroker } from "./merge/merge-broker.js";
 
 const execFileAsync = promisify(execFile);
 
+export interface RunCodingTaskOptions {
+  projectId?: string;
+  modelConfig?: Partial<CodexModelRunnerAdapterConfig>;
+  orchestrator?: Partial<AgentOrchestratorOptions>;
+}
+
 export async function test(
+  message: string,
+  repo: string,
+  branch: string,
+  options: RunCodingTaskOptions = {}
+): Promise<OrchestrationResult> {
+  return runCodingTask(message, repo, branch, options);
+}
+
+export async function runCodingTask(
+  message: string,
+  repo: string,
+  branch: string,
+  options: RunCodingTaskOptions = {}
+): Promise<OrchestrationResult> {
+  await ensureBranch(repo, branch);
+  const project: ProjectSpace = {
+    projectId: options.projectId ?? path.basename(path.resolve(repo)),
+    root: path.resolve(repo),
+  };
+  const workspaceManager =
+    options.orchestrator?.workspaceManager ??
+    new WorkspaceManager({ strategy: "git-worktree", keepWorkspaces: true });
+  const mergeBroker =
+    options.orchestrator?.mergeBroker ?? new MergeBroker({ workspaceManager });
+  const orchestrator = new AgentOrchestrator({
+    modelRunner:
+      options.orchestrator?.modelRunner ??
+      new CodexModelRunnerAdapter(options.modelConfig),
+    workspaceManager,
+    mergeBroker,
+    executeVerificationCommands: true,
+    ...options.orchestrator,
+  });
+  return orchestrator.run(message, project);
+}
+
+export async function runSingleCodexTask(
   message: string,
   repo: string,
   branch: string

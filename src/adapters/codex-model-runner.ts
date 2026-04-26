@@ -1,11 +1,19 @@
 import type {
   ModelRunner,
+  ModelRunnerPlannerContext,
   ModelRunnerReviewerInput,
   ModelRunnerWorkerInput,
   ModelRunnerWorkerOutput,
 } from "../agents/model-runner.js";
-import type { TaskDAG } from "../core/types.js";
-import type { ReviewResult } from "../review/review-types.js";
+import { Codex, type RunResult, type ThreadOptions } from "@openai/codex-sdk";
+import { mkdir, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import path from "node:path";
+import { promisify } from "node:util";
+import type { AgentRole, TaskContract, TaskDAG } from "../core/types.js";
+import type { ReviewResult, ReviewType } from "../review/review-types.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface CodexModelRunnerAdapterConfig {
   plannerModel: string;
@@ -13,6 +21,7 @@ export interface CodexModelRunnerAdapterConfig {
   layoutWorkerModel: string;
   screenWorkerModel: string;
   reviewerModel: string;
+  verifierModel?: string;
 }
 
 export const defaultCodexModelRunnerAdapterConfig: CodexModelRunnerAdapterConfig = {
@@ -25,29 +34,353 @@ export const defaultCodexModelRunnerAdapterConfig: CodexModelRunnerAdapterConfig
 
 export class CodexModelRunnerAdapter implements ModelRunner {
   readonly config: CodexModelRunnerAdapterConfig;
+  private readonly codex: Codex;
 
-  constructor(config: Partial<CodexModelRunnerAdapterConfig> = {}) {
+  constructor(config: Partial<CodexModelRunnerAdapterConfig> = {}, codex = new Codex()) {
     this.config = {
       ...defaultCodexModelRunnerAdapterConfig,
       ...config,
     };
+    this.codex = codex;
   }
 
-  async runPlanner(_requirement: string): Promise<TaskDAG> {
-    throw new Error(
-      "CodexModelRunnerAdapter.runPlanner is an adapter boundary. Wire Codex SDK/OpenAI API here and return a validated TaskDAG."
-    );
+  async runPlanner(requirement: string, context: ModelRunnerPlannerContext = {}): Promise<TaskDAG> {
+    const project = context.project;
+    if (!project) {
+      throw new Error("Codex planner requires ProjectSpace context.");
+    }
+
+    const thread = this.codex.startThread({
+      model: this.config.plannerModel,
+      modelReasoningEffort: "xhigh",
+      sandboxMode: "read-only",
+      workingDirectory: project.root,
+      approvalPolicy: "never",
+      webSearchEnabled: false,
+    });
+
+    const result = await thread.run(createPlannerPrompt(requirement), {
+      outputSchema: taskDagSchema,
+    });
+    return parseJsonResponse<TaskDAG>(result.finalResponse, "planner TaskDAG");
   }
 
-  async runWorker(_input: ModelRunnerWorkerInput): Promise<ModelRunnerWorkerOutput> {
-    throw new Error(
-      "CodexModelRunnerAdapter.runWorker is an adapter boundary. Run the task in its isolated workspace and return structured worker output."
-    );
+  async runWorker(input: ModelRunnerWorkerInput): Promise<ModelRunnerWorkerOutput> {
+    const model = this.modelForRole(input.task.role);
+    const thread = this.codex.startThread({
+      model,
+      modelReasoningEffort: reasoningForRole(input.task.role),
+      sandboxMode: "workspace-write",
+      workingDirectory: input.workspacePath,
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
+      webSearchEnabled: false,
+    });
+
+    const result = await thread.run(createWorkerPrompt(input.task, model));
+    const patchPath = await createGitPatch(input.workspacePath, input.task.taskId);
+    const changedFiles = await getChangedFiles(input.workspacePath);
+
+    return {
+      summary: result.finalResponse,
+      changedFiles,
+      patchPath,
+      logs: resultToLogs(result),
+    };
   }
 
-  async runReviewer(_input: ModelRunnerReviewerInput): Promise<ReviewResult> {
-    throw new Error(
-      "CodexModelRunnerAdapter.runReviewer is an adapter boundary. Return a structured ReviewResult without modifying source files."
-    );
+  async runReviewer(input: ModelRunnerReviewerInput): Promise<ReviewResult> {
+    if (!input.workspacePath) {
+      throw new Error("Codex reviewer requires a review workspacePath.");
+    }
+
+    const thread = this.codex.startThread({
+      model: this.config.reviewerModel,
+      modelReasoningEffort: input.reviewType === "security" ? "xhigh" : "high",
+      sandboxMode: "workspace-write",
+      workingDirectory: input.workspacePath,
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
+      webSearchEnabled: false,
+    });
+
+    const result = await thread.run(createReviewerPrompt(input.task, input.reviewType), {
+      outputSchema: reviewResultSchema,
+    });
+    return parseJsonResponse<ReviewResult>(result.finalResponse, `${input.reviewType} ReviewResult`);
+  }
+
+  private modelForRole(role: AgentRole): string {
+    switch (role) {
+      case "component-worker":
+        return this.config.componentWorkerModel;
+      case "layout-worker":
+        return this.config.layoutWorkerModel;
+      case "screen-worker":
+        return this.config.screenWorkerModel;
+      case "reviewer":
+        return this.config.reviewerModel;
+      case "planner":
+        return this.config.plannerModel;
+      case "verifier":
+      case "merge-broker":
+        return this.config.verifierModel ?? this.config.screenWorkerModel;
+    }
   }
 }
+
+function reasoningForRole(role: AgentRole): ThreadOptions["modelReasoningEffort"] {
+  switch (role) {
+    case "component-worker":
+      return "low";
+    case "layout-worker":
+      return "medium";
+    case "screen-worker":
+      return "high";
+    case "reviewer":
+      return "high";
+    case "planner":
+      return "xhigh";
+    case "verifier":
+    case "merge-broker":
+      return "medium";
+  }
+}
+
+function createPlannerPrompt(requirement: string): string {
+  return [
+    "You are the planner agent in a multi-model coding orchestration system.",
+    "Read the repository and split the user's coding requirement into a TaskDAG.",
+    "",
+    "Hard rules:",
+    "- Use component-worker tasks for small pure functions, pure components, validators, formatters, mappers, and tiny types.",
+    "- component-worker tasks must be small and must not share writePaths with parallel component-worker tasks.",
+    "- Use layout-worker tasks for presentational layout composition.",
+    "- Use screen-worker tasks for state, orchestration, app wiring, routing, lifecycle, and complex integration.",
+    "- Add verifier and reviewer tasks after implementation tasks.",
+    "- Reviewer tasks must depend on every implementation task.",
+    "- Do not include projectType.",
+    "- Use relative paths only.",
+    "- Always include reasoningEffort, expectedOutputs, and notes. Use empty arrays for no outputs/notes.",
+    "- Avoid package.json/global config changes unless absolutely necessary.",
+    "- Keep forbiddenPaths populated with .env, .git, node_modules, dist, build, .next, coverage.",
+    "",
+    `Requirement:\n${requirement}`,
+  ].join("\n");
+}
+
+function createWorkerPrompt(task: TaskContract, model: string): string {
+  return [
+    `You are running as ${task.role} using model ${model}.`,
+    "Implement only the assigned TaskContract.",
+    "",
+    "TaskContract:",
+    JSON.stringify(task, null, 2),
+    "",
+    "Hard rules:",
+    "- Edit only files inside writePaths.",
+    "- Do not edit forbiddenPaths.",
+    "- If role is component-worker, keep work limited to pure functions, pure components, tiny validators/formatters/mappers/types.",
+    "- If role is layout-worker, do not own screen-level data loading or complex orchestration.",
+    "- If role is screen-worker, wire the screen/application behavior using existing lower-level pieces.",
+    "- Run the task verification commands when practical.",
+    "- Leave a concise final summary with files changed and verification.",
+  ].join("\n");
+}
+
+function createReviewerPrompt(task: TaskContract, reviewType: ReviewType): string {
+  return [
+    `You are a read-only ${reviewType} reviewer.`,
+    "Do not modify source files. You may inspect files and run verification commands.",
+    "Return only a structured ReviewResult matching the provided schema.",
+    "For issue.file, use an empty string when the issue is not tied to a single file.",
+    "",
+    "Review task:",
+    JSON.stringify(task, null, 2),
+  ].join("\n");
+}
+
+async function createGitPatch(workspacePath: string, taskId: string): Promise<string> {
+  const patchDir = path.join(workspacePath, ".agent-orchestrator", "patches");
+  await mkdir(patchDir, { recursive: true });
+  await execFileAsync("git", ["-C", workspacePath, "add", "-N", "."], { encoding: "utf8" }).catch(
+    () => undefined
+  );
+  const { stdout } = await execFileAsync("git", ["-C", workspacePath, "diff", "--binary", "HEAD"], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 20,
+  });
+  const patchPath = path.join(patchDir, `${taskId}.patch`);
+  await writeFile(patchPath, stdout, "utf8");
+  return patchPath;
+}
+
+async function getChangedFiles(workspacePath: string): Promise<string[]> {
+  await execFileAsync("git", ["-C", workspacePath, "add", "-N", "."], { encoding: "utf8" }).catch(
+    () => undefined
+  );
+  const { stdout } = await execFileAsync("git", ["-C", workspacePath, "diff", "--name-only", "HEAD"], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+  });
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((filePath) => !filePath.startsWith(".agent-orchestrator/"));
+}
+
+function resultToLogs(result: RunResult): string[] {
+  return result.items.map((item) => {
+    if (item.type === "agent_message") {
+      return item.text;
+    }
+    if (item.type === "command_execution") {
+      return `${item.status}: ${item.command}\n${item.aggregated_output}`;
+    }
+    if (item.type === "file_change") {
+      return `${item.status}: ${item.changes.map((change) => `${change.kind}:${change.path}`).join(", ")}`;
+    }
+    return item.type;
+  });
+}
+
+function parseJsonResponse<T>(raw: string, label: string): T {
+  const trimmed = raw.trim();
+  const withoutFence = trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(withoutFence) as T;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse ${label}: ${message}. Raw response: ${raw.slice(0, 1200)}`);
+  }
+}
+
+const stringArraySchema = {
+  type: "array",
+  items: { type: "string" },
+};
+
+const taskContractSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string" },
+    title: { type: "string" },
+    role: {
+      type: "string",
+      enum: [
+        "planner",
+        "component-worker",
+        "layout-worker",
+        "screen-worker",
+        "reviewer",
+        "verifier",
+        "merge-broker",
+      ],
+    },
+    modelTier: { type: "string", enum: ["spark", "mini", "gpt-5.5", "program"] },
+    reasoningEffort: { type: "string", enum: ["none", "low", "medium", "high", "xhigh"] },
+    objective: { type: "string" },
+    readPaths: stringArraySchema,
+    writePaths: stringArraySchema,
+    forbiddenPaths: stringArraySchema,
+    dependencies: stringArraySchema,
+    acceptanceCriteria: stringArraySchema,
+    verificationCommands: stringArraySchema,
+    riskLevel: { type: "string", enum: ["low", "medium", "high", "critical"] },
+    expectedOutputs: stringArraySchema,
+    notes: stringArraySchema,
+  },
+  required: [
+    "taskId",
+    "title",
+    "role",
+    "modelTier",
+    "reasoningEffort",
+    "objective",
+    "readPaths",
+    "writePaths",
+    "forbiddenPaths",
+    "dependencies",
+    "acceptanceCriteria",
+    "verificationCommands",
+    "riskLevel",
+    "expectedOutputs",
+    "notes",
+  ],
+};
+
+const taskDagSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    dagId: { type: "string" },
+    tasks: { type: "array", items: taskContractSchema },
+    edges: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          from: { type: "string" },
+          to: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["from", "to", "reason"],
+      },
+    },
+  },
+  required: ["dagId", "tasks", "edges"],
+};
+
+const reviewIssueSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    severity: { type: "string", enum: ["low", "medium", "high", "critical"] },
+    file: { type: "string" },
+    evidence: { type: "string" },
+    requiredFix: { type: "string" },
+  },
+  required: ["severity", "file", "evidence", "requiredFix"],
+};
+
+const commandRunResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    command: { type: "string" },
+    status: { type: "string", enum: ["passed", "failed", "skipped"] },
+    outputSummary: { type: "string" },
+  },
+  required: ["command", "status", "outputSummary"],
+};
+
+const reviewResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    reviewerId: { type: "string" },
+    reviewType: { type: "string", enum: ["contract", "integration", "architecture", "security"] },
+    status: { type: "string", enum: ["pass", "needs_changes", "reject"] },
+    summary: { type: "string" },
+    blockingIssues: { type: "array", items: reviewIssueSchema },
+    nonBlockingIssues: { type: "array", items: reviewIssueSchema },
+    commandsRun: { type: "array", items: commandRunResultSchema },
+    suggestedFixTasks: { type: "array", items: taskContractSchema },
+  },
+  required: [
+    "reviewerId",
+    "reviewType",
+    "status",
+    "summary",
+    "blockingIssues",
+    "nonBlockingIssues",
+    "commandsRun",
+    "suggestedFixTasks",
+  ],
+};
