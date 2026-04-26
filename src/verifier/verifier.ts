@@ -79,6 +79,7 @@ export class VerifierWorker implements AgentWorker {
     return {
       taskId: task.taskId,
       workerId: this.workerId,
+      threadRunId: context.telemetry?.threadRunId,
       status: verification.status === "failed" ? "failed" : "success",
       changedFiles: [],
       logs: verification.commands.map(

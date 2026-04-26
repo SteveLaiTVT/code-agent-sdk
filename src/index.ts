@@ -7,7 +7,7 @@ import {
   CodexModelRunnerAdapter,
   type CodexModelRunnerAdapterConfig,
 } from "./adapters/codex-model-runner.js";
-import type { OrchestrationResult, ProjectSpace } from "./core/types.js";
+import type { OrchestrationResult, OrchestrationStream, ProjectSpace } from "./core/types.js";
 import { WorkspaceManager } from "./workspace/workspace-manager.js";
 import { MergeBroker } from "./merge/merge-broker.js";
 
@@ -34,6 +34,25 @@ export async function runCodingTask(
   branch: string,
   options: RunCodingTaskOptions = {}
 ): Promise<OrchestrationResult> {
+  const { orchestrator, project } = await createCodingTaskContext(repo, branch, options);
+  return orchestrator.run(message, project);
+}
+
+export async function runCodingTaskStreamed(
+  message: string,
+  repo: string,
+  branch: string,
+  options: RunCodingTaskOptions = {}
+): Promise<OrchestrationStream> {
+  const { orchestrator, project } = await createCodingTaskContext(repo, branch, options);
+  return orchestrator.runStreamed(message, project);
+}
+
+async function createCodingTaskContext(
+  repo: string,
+  branch: string,
+  options: RunCodingTaskOptions
+): Promise<{ orchestrator: AgentOrchestrator; project: ProjectSpace }> {
   await ensureBranch(repo, branch);
   const project: ProjectSpace = {
     projectId: options.projectId ?? path.basename(path.resolve(repo)),
@@ -50,10 +69,11 @@ export async function runCodingTask(
       new CodexModelRunnerAdapter(options.modelConfig),
     workspaceManager,
     mergeBroker,
+    plannerModel: options.modelConfig?.plannerModel,
     executeVerificationCommands: true,
     ...options.orchestrator,
   });
-  return orchestrator.run(message, project);
+  return { orchestrator, project };
 }
 
 export async function runSingleCodexTask(
@@ -99,6 +119,7 @@ export * from "./agents/worker-pool.js";
 export * from "./agents/orchestrator.js";
 export * from "./adapters/codex-model-runner.js";
 export * from "./core/types.js";
+export * from "./core/orchestration-stream.js";
 export * from "./core/task-dag.js";
 export * from "./core/task-contract.js";
 export * from "./core/path-safety.js";

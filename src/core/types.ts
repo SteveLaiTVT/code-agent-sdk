@@ -1,3 +1,5 @@
+import type { ThreadEvent, Usage } from "@openai/codex-sdk";
+
 export type AgentRole =
   | "planner"
   | "component-worker"
@@ -51,7 +53,8 @@ export interface TaskContract {
   taskId: string;
   title: string;
   role: AgentRole;
-  modelTier: ModelTier;
+  model: string;
+  modelTier?: ModelTier;
   reasoningEffort?: ReasoningEffort;
   objective: string;
   readPaths: string[];
@@ -143,5 +146,146 @@ export interface OrchestrationResult {
   mergeResults: MergeResult[];
   verificationResults: VerificationResult[];
   reviewResults: import("../review/review-types.js").ReviewResult[];
+  trace: ThreadRunTrace[];
+  modelUsage: ModelUsageSummary;
   summary: string;
+}
+
+export interface ThreadRunTrace {
+  runId: string;
+  threadRunId: string;
+  threadId?: string;
+  taskId?: string;
+  workerId?: string;
+  role: AgentRole;
+  model: string;
+  reasoningEffort?: ReasoningEffort;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  completedAt?: string;
+  usage?: Usage | null;
+  events: ThreadEvent[];
+}
+
+export interface ModelUsageStats {
+  model: string;
+  threadCount: number;
+  turnCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+}
+
+export interface ModelUsageSummary {
+  byModel: Record<string, ModelUsageStats>;
+  totals: Omit<ModelUsageStats, "model">;
+}
+
+export type OrchestrationEventSink = (event: OrchestrationEvent) => void;
+
+export interface ModelRunTelemetry {
+  runId: string;
+  threadRunId: string;
+  threadId?: string;
+  taskId?: string;
+  workerId?: string;
+  role: AgentRole;
+  model: string;
+  reasoningEffort?: ReasoningEffort;
+  emit: OrchestrationEventSink;
+}
+
+interface OrchestrationEventBase {
+  runId: string;
+  timestamp: string;
+}
+
+export type OrchestrationEvent =
+  | (OrchestrationEventBase & {
+      type: "run.started";
+      requirement: string;
+      project: ProjectSpace;
+    })
+  | (OrchestrationEventBase & {
+      type: "planner.started";
+      model: string;
+      reasoningEffort?: ReasoningEffort;
+    })
+  | (OrchestrationEventBase & {
+      type: "planner.completed";
+      dag: TaskDAG;
+    })
+  | (OrchestrationEventBase & {
+      type: "planner.failed";
+      error: string;
+    })
+  | (OrchestrationEventBase & {
+      type: "task.started";
+      task: TaskContract;
+      workerId: string;
+      threadRunId?: string;
+    })
+  | (OrchestrationEventBase & {
+      type: "task.completed";
+      task: TaskContract;
+      workerId: string;
+      threadRunId?: string;
+      result?: import("../agents/worker.js").WorkerResult;
+    })
+  | (OrchestrationEventBase & {
+      type: "task.failed";
+      task: TaskContract;
+      workerId: string;
+      threadRunId?: string;
+      error: string;
+    })
+  | (OrchestrationEventBase & {
+      type: "merge.completed";
+      task: TaskContract;
+      result: MergeResult;
+    })
+  | (OrchestrationEventBase & {
+      type: "verification.completed";
+      result: VerificationResult;
+    })
+  | (OrchestrationEventBase & {
+      type: "review.completed";
+      task: TaskContract;
+      result: import("../review/review-types.js").ReviewResult;
+    })
+  | (OrchestrationEventBase & {
+      type: "thread.event";
+      threadRunId: string;
+      threadId?: string;
+      taskId?: string;
+      workerId?: string;
+      role: AgentRole;
+      model: string;
+      reasoningEffort?: ReasoningEffort;
+      sdkEvent: ThreadEvent;
+    })
+  | (OrchestrationEventBase & {
+      type: "model.usage";
+      threadRunId: string;
+      threadId?: string;
+      taskId?: string;
+      workerId?: string;
+      role: AgentRole;
+      model: string;
+      usage: Usage;
+    })
+  | (OrchestrationEventBase & {
+      type: "run.completed";
+      result: OrchestrationResult;
+    })
+  | (OrchestrationEventBase & {
+      type: "run.failed";
+      error: string;
+      result: OrchestrationResult;
+    });
+
+export interface OrchestrationStream {
+  events: AsyncIterable<OrchestrationEvent>;
+  result: Promise<OrchestrationResult>;
 }

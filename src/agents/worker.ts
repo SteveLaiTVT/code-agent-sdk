@@ -1,7 +1,13 @@
 import type { ModelRunner } from "./model-runner.js";
 import { MockModelRunner } from "./model-runner.js";
 import { createMockPatchFile } from "../workspace/patch.js";
-import type { AgentRole, ProjectSpace, TaskContract, VerificationResult } from "../core/types.js";
+import type {
+  AgentRole,
+  ModelRunTelemetry,
+  ProjectSpace,
+  TaskContract,
+  VerificationResult,
+} from "../core/types.js";
 
 export interface WorkerContext {
   project: ProjectSpace;
@@ -9,11 +15,13 @@ export interface WorkerContext {
   codexOptions: object;
   inputFiles?: string[];
   taskContract: TaskContract;
+  telemetry?: ModelRunTelemetry;
 }
 
 export interface WorkerResult {
   taskId: string;
   workerId: string;
+  threadRunId?: string;
   status: "success" | "failed" | "needs_review";
   patchPath?: string;
   changedFiles: string[];
@@ -49,6 +57,7 @@ abstract class BasePatchWorker implements AgentWorker {
       return {
         taskId: task.taskId,
         workerId: this.workerId,
+        threadRunId: context.telemetry?.threadRunId,
         status: "failed",
         changedFiles: [],
         logs: [`Role mismatch: worker=${this.role}, task=${task.role}`],
@@ -60,11 +69,13 @@ abstract class BasePatchWorker implements AgentWorker {
       const output = await this.modelRunner.runWorker({
         task,
         workspacePath: context.workspacePath,
+        telemetry: context.telemetry,
       });
       const patchPath = output.patchPath ?? (await createMockPatchFile(context.workspacePath, task));
       return {
         taskId: task.taskId,
         workerId: this.workerId,
+        threadRunId: context.telemetry?.threadRunId,
         status: "success",
         patchPath,
         changedFiles: output.changedFiles,
@@ -76,6 +87,7 @@ abstract class BasePatchWorker implements AgentWorker {
       return {
         taskId: task.taskId,
         workerId: this.workerId,
+        threadRunId: context.telemetry?.threadRunId,
         status: "failed",
         changedFiles: [],
         logs: [message],

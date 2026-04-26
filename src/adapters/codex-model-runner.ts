@@ -5,12 +5,22 @@ import type {
   ModelRunnerWorkerInput,
   ModelRunnerWorkerOutput,
 } from "../agents/model-runner.js";
-import { Codex, type RunResult, type ThreadOptions } from "@openai/codex-sdk";
+import {
+  Codex,
+  type Input,
+  type RunResult,
+  type Thread,
+  type ThreadItem,
+  type ThreadOptions,
+  type TurnOptions,
+  type Usage,
+} from "@openai/codex-sdk";
 import { mkdir, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { AgentRole, TaskContract, TaskDAG } from "../core/types.js";
+import { emitThreadEvent } from "../core/orchestration-stream.js";
+import type { AgentRole, ModelRunTelemetry, TaskContract, TaskDAG } from "../core/types.js";
 import type { ReviewResult, ReviewType } from "../review/review-types.js";
 
 const execFileAsync = promisify(execFile);
@@ -59,17 +69,22 @@ export class CodexModelRunnerAdapter implements ModelRunner {
       webSearchEnabled: false,
     });
 
-    const result = await thread.run(createPlannerPrompt(requirement), {
-      outputSchema: taskDagSchema,
-    });
+    const result = await runThreadStreamed(
+      thread,
+      createPlannerPrompt(requirement),
+      {
+        outputSchema: taskDagSchema,
+      },
+      context.telemetry
+    );
     return parseJsonResponse<TaskDAG>(result.finalResponse, "planner TaskDAG");
   }
 
   async runWorker(input: ModelRunnerWorkerInput): Promise<ModelRunnerWorkerOutput> {
-    const model = this.modelForRole(input.task.role);
+    const model = input.task.model || this.modelForRole(input.task.role);
     const thread = this.codex.startThread({
       model,
-      modelReasoningEffort: reasoningForRole(input.task.role),
+      modelReasoningEffort: reasoningForTask(input.task),
       sandboxMode: "workspace-write",
       workingDirectory: input.workspacePath,
       approvalPolicy: "never",
@@ -77,7 +92,12 @@ export class CodexModelRunnerAdapter implements ModelRunner {
       webSearchEnabled: false,
     });
 
-    const result = await thread.run(createWorkerPrompt(input.task, model));
+    const result = await runThreadStreamed(
+      thread,
+      createWorkerPrompt(input.task, model),
+      undefined,
+      input.telemetry
+    );
     const patchPath = await createGitPatch(input.workspacePath, input.task.taskId);
     const changedFiles = await getChangedFiles(input.workspacePath);
 
@@ -94,8 +114,9 @@ export class CodexModelRunnerAdapter implements ModelRunner {
       throw new Error("Codex reviewer requires a review workspacePath.");
     }
 
+    const model = input.task.model || this.config.reviewerModel;
     const thread = this.codex.startThread({
-      model: this.config.reviewerModel,
+      model,
       modelReasoningEffort: input.reviewType === "security" ? "xhigh" : "high",
       sandboxMode: "workspace-write",
       workingDirectory: input.workspacePath,
@@ -104,9 +125,14 @@ export class CodexModelRunnerAdapter implements ModelRunner {
       webSearchEnabled: false,
     });
 
-    const result = await thread.run(createReviewerPrompt(input.task, input.reviewType), {
-      outputSchema: reviewResultSchema,
-    });
+    const result = await runThreadStreamed(
+      thread,
+      createReviewerPrompt(input.task, input.reviewType),
+      {
+        outputSchema: reviewResultSchema,
+      },
+      input.telemetry
+    );
     return parseJsonResponse<ReviewResult>(result.finalResponse, `${input.reviewType} ReviewResult`);
   }
 
@@ -129,6 +155,51 @@ export class CodexModelRunnerAdapter implements ModelRunner {
   }
 }
 
+async function runThreadStreamed(
+  thread: Thread,
+  input: Input,
+  turnOptions: TurnOptions | undefined,
+  telemetry: ModelRunTelemetry | undefined
+): Promise<RunResult> {
+  const streamed = await thread.runStreamed(input, turnOptions);
+  const itemsById = new Map<string, ThreadItem>();
+  let usage: Usage | null = null;
+
+  for await (const event of streamed.events) {
+    emitThreadEvent(telemetry, event);
+
+    if (
+      event.type === "item.started" ||
+      event.type === "item.updated" ||
+      event.type === "item.completed"
+    ) {
+      itemsById.set(event.item.id, event.item);
+    }
+    if (event.type === "turn.completed") {
+      usage = event.usage;
+    }
+    if (event.type === "turn.failed") {
+      throw new Error(`Codex turn failed: ${event.error.message}`);
+    }
+    if (event.type === "error") {
+      throw new Error(`Codex stream failed: ${event.message}`);
+    }
+  }
+
+  const items = [...itemsById.values()];
+  let finalResponse = "";
+  for (const item of items) {
+    if (item.type === "agent_message") {
+      finalResponse = item.text;
+    }
+  }
+  return {
+    items,
+    finalResponse,
+    usage,
+  };
+}
+
 function reasoningForRole(role: AgentRole): ThreadOptions["modelReasoningEffort"] {
   switch (role) {
     case "component-worker":
@@ -147,6 +218,13 @@ function reasoningForRole(role: AgentRole): ThreadOptions["modelReasoningEffort"
   }
 }
 
+function reasoningForTask(task: TaskContract): ThreadOptions["modelReasoningEffort"] {
+  if (task.reasoningEffort === "none") {
+    return "minimal";
+  }
+  return task.reasoningEffort ?? reasoningForRole(task.role);
+}
+
 function createPlannerPrompt(requirement: string): string {
   return [
     "You are the planner agent in a multi-model coding orchestration system.",
@@ -157,11 +235,13 @@ function createPlannerPrompt(requirement: string): string {
     "- component-worker tasks must be small and must not share writePaths with parallel component-worker tasks.",
     "- Use layout-worker tasks for presentational layout composition.",
     "- Use screen-worker tasks for state, orchestration, app wiring, routing, lifecycle, and complex integration.",
+    "- For every task, set model to the exact model string that should run that task.",
+    "- Prefer gpt-5.3-codex-spark for tiny pure component-worker tasks, gpt-5.4-mini for layout-worker tasks, and gpt-5.5 for planner/reviewer/high-risk integration tasks.",
     "- Add verifier and reviewer tasks after implementation tasks.",
     "- Reviewer tasks must depend on every implementation task.",
     "- Do not include projectType.",
     "- Use relative paths only.",
-    "- Always include reasoningEffort, expectedOutputs, and notes. Use empty arrays for no outputs/notes.",
+    "- Always include model, reasoningEffort, expectedOutputs, and notes. Use empty arrays for no outputs/notes.",
     "- Avoid package.json/global config changes unless absolutely necessary.",
     "- Keep forbiddenPaths populated with .env, .git, node_modules, dist, build, .next, coverage.",
     "",
@@ -282,6 +362,7 @@ const taskContractSchema = {
         "merge-broker",
       ],
     },
+    model: { type: "string" },
     modelTier: { type: "string", enum: ["spark", "mini", "gpt-5.5", "program"] },
     reasoningEffort: { type: "string", enum: ["none", "low", "medium", "high", "xhigh"] },
     objective: { type: "string" },
@@ -299,7 +380,7 @@ const taskContractSchema = {
     "taskId",
     "title",
     "role",
-    "modelTier",
+    "model",
     "reasoningEffort",
     "objective",
     "readPaths",

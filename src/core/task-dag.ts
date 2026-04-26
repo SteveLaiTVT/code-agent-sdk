@@ -150,6 +150,10 @@ export function validateTaskDAG(dag: TaskDAG): ValidationResult {
   }
 
   for (const task of dag.tasks) {
+    if (!task.model?.trim()) {
+      errors.push(`Task ${task.taskId} must declare a concrete model`);
+    }
+
     if (hasPathOverlap(task.writePaths, task.forbiddenPaths)) {
       errors.push(`Task ${task.taskId} writePaths overlap forbiddenPaths`);
     }

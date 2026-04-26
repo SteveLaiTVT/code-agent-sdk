@@ -60,6 +60,7 @@ export class ReviewWorker implements AgentWorker {
       verification,
       project: context.project,
       workspacePath: context.workspacePath,
+      telemetry: context.telemetry,
     });
     const reportDir = path.join(context.workspacePath, ".agent-orchestrator", "reviews");
     await mkdir(reportDir, { recursive: true });
@@ -77,6 +78,7 @@ export class ReviewWorker implements AgentWorker {
       return {
         taskId: task.taskId,
         workerId: this.workerId,
+        threadRunId: context.telemetry?.threadRunId,
         status: review.status === "reject" ? "failed" : review.status === "needs_changes" ? "needs_review" : "success",
         changedFiles: [],
         reportPath: path.join(
@@ -93,6 +95,7 @@ export class ReviewWorker implements AgentWorker {
       return {
         taskId: task.taskId,
         workerId: this.workerId,
+        threadRunId: context.telemetry?.threadRunId,
         status: "failed",
         changedFiles: [],
         logs: [message],

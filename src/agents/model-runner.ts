@@ -1,9 +1,17 @@
 import type { ReviewResult } from "../review/review-types.js";
-import type { ProjectSpace, TaskContract, TaskDAG, VerificationResult } from "../core/types.js";
+import { emitThreadEvent } from "../core/orchestration-stream.js";
+import type {
+  ModelRunTelemetry,
+  ProjectSpace,
+  TaskContract,
+  TaskDAG,
+  VerificationResult,
+} from "../core/types.js";
 
 export interface ModelRunnerWorkerInput {
   task: TaskContract;
   workspacePath: string;
+  telemetry?: ModelRunTelemetry;
 }
 
 export interface ModelRunnerWorkerOutput {
@@ -19,10 +27,12 @@ export interface ModelRunnerReviewerInput {
   project?: ProjectSpace;
   workspacePath?: string;
   verification?: VerificationResult;
+  telemetry?: ModelRunTelemetry;
 }
 
 export interface ModelRunnerPlannerContext {
   project?: ProjectSpace;
+  telemetry?: ModelRunTelemetry;
 }
 
 export interface ModelRunner {
@@ -36,7 +46,7 @@ function generatedPath(fileName: string): string {
 }
 
 export class MockModelRunner implements ModelRunner {
-  async runPlanner(requirement: string): Promise<TaskDAG> {
+  async runPlanner(requirement: string, context: ModelRunnerPlannerContext = {}): Promise<TaskDAG> {
     const implementationTaskIds = [
       "spark-status-badge",
       "spark-task-card",
@@ -55,6 +65,7 @@ export class MockModelRunner implements ModelRunner {
         taskId: "spark-status-badge",
         title: "Implement StatusBadge pure component",
         role: "component-worker",
+        model: "gpt-5.3-codex-spark",
         modelTier: "spark",
         reasoningEffort: "low",
         objective: `Create the low-risk StatusBadge piece for: ${requirement}`,
@@ -70,6 +81,7 @@ export class MockModelRunner implements ModelRunner {
         taskId: "spark-task-card",
         title: "Implement TaskCard pure component",
         role: "component-worker",
+        model: "gpt-5.3-codex-spark",
         modelTier: "spark",
         reasoningEffort: "low",
         objective: `Create the low-risk TaskCard piece for: ${requirement}`,
@@ -85,6 +97,7 @@ export class MockModelRunner implements ModelRunner {
         taskId: "mini-task-card-grid",
         title: "Implement TaskCardGrid layout",
         role: "layout-worker",
+        model: "gpt-5.4-mini",
         modelTier: "mini",
         reasoningEffort: "medium",
         objective: "Compose task cards into a grid layout with loading and empty states.",
@@ -100,6 +113,7 @@ export class MockModelRunner implements ModelRunner {
         taskId: "gpt-task-board-screen",
         title: "Implement TaskBoardScreen logic",
         role: "screen-worker",
+        model: "gpt-5.5",
         modelTier: "gpt-5.5",
         reasoningEffort: "high",
         objective: "Coordinate TaskCardGrid data, filters, errors, and routing-level state.",
@@ -115,6 +129,7 @@ export class MockModelRunner implements ModelRunner {
         taskId: "verify-full-chain",
         title: "Run full verification",
         role: "verifier",
+        model: "program",
         modelTier: "program",
         reasoningEffort: "none",
         objective: "Run typecheck, lint, unit test, build or configured equivalents.",
@@ -132,6 +147,7 @@ export class MockModelRunner implements ModelRunner {
           taskId,
           title: `${reviewType} review`,
           role: "reviewer",
+          model: "gpt-5.5",
           modelTier: "gpt-5.5",
           reasoningEffort: reviewType === "security" ? "xhigh" : "high",
           objective: `Run ${reviewType} review without modifying source.`,
@@ -148,7 +164,7 @@ export class MockModelRunner implements ModelRunner {
       }),
     ];
 
-    return {
+    const dag: TaskDAG = {
       dagId: `mock-task-board-${Date.now()}`,
       tasks,
       edges: tasks.flatMap((task) =>
@@ -159,18 +175,22 @@ export class MockModelRunner implements ModelRunner {
         }))
       ),
     };
+    emitMockTurn(context.telemetry, JSON.stringify(dag), 16);
+    return dag;
   }
 
   async runWorker(input: ModelRunnerWorkerInput): Promise<ModelRunnerWorkerOutput> {
-    return {
+    const output = {
       summary: `${input.task.role} completed ${input.task.title} in mock mode.`,
       changedFiles: input.task.writePaths,
       logs: [`mock-runner:${input.task.taskId}`, `workspace:${input.workspacePath}`],
     };
+    emitMockTurn(input.telemetry, output.summary, 8);
+    return output;
   }
 
   async runReviewer(input: ModelRunnerReviewerInput): Promise<ReviewResult> {
-    return {
+    const result: ReviewResult = {
       reviewerId: `mock-${input.reviewType}-reviewer`,
       reviewType: input.reviewType,
       status: "pass",
@@ -187,5 +207,39 @@ export class MockModelRunner implements ModelRunner {
           : [],
       suggestedFixTasks: [],
     };
+    emitMockTurn(input.telemetry, JSON.stringify(result), 6);
+    return result;
   }
+}
+
+function emitMockTurn(
+  telemetry: ModelRunTelemetry | undefined,
+  text: string,
+  tokenBase: number
+): void {
+  if (!telemetry) {
+    return;
+  }
+  emitThreadEvent(telemetry, {
+    type: "thread.started",
+    thread_id: `mock-${telemetry.threadRunId}`,
+  });
+  emitThreadEvent(telemetry, { type: "turn.started" });
+  emitThreadEvent(telemetry, {
+    type: "item.completed",
+    item: {
+      id: `mock-message-${telemetry.threadRunId}`,
+      type: "agent_message",
+      text,
+    },
+  });
+  emitThreadEvent(telemetry, {
+    type: "turn.completed",
+    usage: {
+      input_tokens: tokenBase,
+      cached_input_tokens: 0,
+      output_tokens: tokenBase + 1,
+      reasoning_output_tokens: Math.max(0, tokenBase - 2),
+    },
+  });
 }
