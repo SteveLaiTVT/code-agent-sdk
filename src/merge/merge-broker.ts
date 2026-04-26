@@ -1,4 +1,4 @@
-import { getPatchChangedFiles, readMockPatchFile } from "../workspace/patch.js";
+import { getAnyPatchChangedFiles, readMockPatchFile } from "../workspace/patch.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import { hasPathOverlap, isPathWithinAnyPath } from "../core/path-safety.js";
 import type { MergeResult, ProjectSpace, TaskContract, ValidationResult } from "../core/types.js";
@@ -26,11 +26,21 @@ export class MergeBroker {
     const warnings: string[] = [];
 
     try {
-      const patch = await readMockPatchFile(patchPath);
-      const changedFiles = patch.changedFiles.length > 0 ? patch.changedFiles : await getPatchChangedFiles(patchPath);
+      let patchTaskId: string | undefined;
+      let operationPaths: string[] = [];
+      let changedFiles: string[];
 
-      if (patch.taskId !== task.taskId) {
-        errors.push(`Patch taskId ${patch.taskId} does not match task ${task.taskId}`);
+      try {
+        const patch = await readMockPatchFile(patchPath);
+        patchTaskId = patch.taskId;
+        operationPaths = patch.operations.map((operation) => operation.path);
+        changedFiles = patch.changedFiles.length > 0 ? patch.changedFiles : operationPaths;
+      } catch {
+        changedFiles = await getAnyPatchChangedFiles(patchPath);
+      }
+
+      if (patchTaskId && patchTaskId !== task.taskId) {
+        errors.push(`Patch taskId ${patchTaskId} does not match task ${task.taskId}`);
       }
 
       for (const changedFile of changedFiles) {
@@ -42,9 +52,9 @@ export class MergeBroker {
         }
       }
 
-      for (const operation of patch.operations) {
-        if (!changedFiles.includes(operation.path)) {
-          warnings.push(`Patch operation path ${operation.path} is not listed in changedFiles`);
+      for (const operationPath of operationPaths) {
+        if (!changedFiles.includes(operationPath)) {
+          warnings.push(`Patch operation path ${operationPath} is not listed in changedFiles`);
         }
       }
     } catch (error) {

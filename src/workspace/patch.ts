@@ -77,3 +77,29 @@ export async function getPatchChangedFiles(patchPath: string): Promise<string[]>
   const patch = await readMockPatchFile(patchPath);
   return patch.changedFiles;
 }
+
+export function parseUnifiedDiffChangedFiles(diffText: string): string[] {
+  const changedFiles = new Set<string>();
+  const diffHeaderPattern = /^diff --git a\/(.+?) b\/(.+)$/gm;
+  let match: RegExpExecArray | null;
+
+  while ((match = diffHeaderPattern.exec(diffText))) {
+    const left = match[1];
+    const right = match[2];
+    const candidate = right === "/dev/null" ? left : right;
+    if (candidate && candidate !== "/dev/null") {
+      changedFiles.add(candidate);
+    }
+  }
+
+  return [...changedFiles];
+}
+
+export async function getAnyPatchChangedFiles(patchPath: string): Promise<string[]> {
+  try {
+    return await getPatchChangedFiles(patchPath);
+  } catch {
+    const diffText = await readFile(patchPath, "utf8");
+    return parseUnifiedDiffChangedFiles(diffText);
+  }
+}
