@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -35,6 +35,7 @@ export class WorkspaceManager {
       await execFileAsync("git", ["-C", project.root, "worktree", "add", "--detach", workspacePath, "HEAD"], {
         encoding: "utf8",
       });
+      await linkProjectSupportPaths(project.root, workspacePath);
       return workspacePath;
     }
     await mkdir(workspacePath, { recursive: true });
@@ -75,6 +76,7 @@ export class WorkspaceManager {
     assertInsideProject(project.root, workspacePath);
     await mkdir(workspacePath, { recursive: true });
     await copyProjectSnapshot(project.root, workspacePath);
+    await linkProjectSupportPaths(project.root, workspacePath);
     await execFileAsync("git", ["-C", workspacePath, "init", "-b", "main"], { encoding: "utf8" });
     await execFileAsync("git", ["-C", workspacePath, "add", "."], { encoding: "utf8" });
     await execFileAsync("git", ["-C", workspacePath, "commit", "-m", "review snapshot"], {
@@ -93,6 +95,7 @@ export class WorkspaceManager {
     assertInsideProject(project.root, workspacePath);
     await mkdir(workspacePath, { recursive: true });
     await copyProjectSnapshot(project.root, workspacePath);
+    await linkProjectSupportPaths(project.root, workspacePath);
     await execFileAsync("git", ["-C", workspacePath, "init", "-b", "main"], { encoding: "utf8" });
     await execFileAsync("git", ["-C", workspacePath, "add", "."], { encoding: "utf8" });
     await execFileAsync("git", ["-C", workspacePath, "commit", "-m", "validation snapshot"], {
@@ -206,6 +209,45 @@ export class WorkspaceManager {
       }
     }
   }
+}
+
+const PROJECT_SUPPORT_PATHS = ["node_modules"];
+
+async function linkProjectSupportPaths(projectRoot: string, workspacePath: string): Promise<void> {
+  for (const supportPath of PROJECT_SUPPORT_PATHS) {
+    await linkProjectSupportPath(projectRoot, workspacePath, supportPath);
+  }
+}
+
+async function linkProjectSupportPath(
+  projectRoot: string,
+  workspacePath: string,
+  relativePath: string
+): Promise<void> {
+  const sourcePath = path.join(projectRoot, relativePath);
+  const targetPath = path.join(workspacePath, relativePath);
+  const sourceStats = await lstat(sourcePath).catch(() => undefined);
+  if (!sourceStats) {
+    return;
+  }
+
+  const targetStats = await lstat(targetPath).catch(() => undefined);
+  if (targetStats) {
+    if (targetStats.isSymbolicLink()) {
+      const currentTarget = await readlink(targetPath).catch(() => undefined);
+      if (currentTarget === sourcePath) {
+        return;
+      }
+    }
+    return;
+  }
+
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  await symlink(
+    sourcePath,
+    targetPath,
+    sourceStats.isDirectory() ? (process.platform === "win32" ? "junction" : "dir") : "file"
+  );
 }
 
 async function copyProjectSnapshot(projectRoot: string, workspacePath: string): Promise<void> {
