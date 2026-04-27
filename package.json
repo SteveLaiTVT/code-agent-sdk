@@ -1,5 +1,5 @@
 {
-  "name": "@stevelife/code-agent-sdk",
+  "name": "@steve-life/code-agent-sdk",
   "version": "0.0.1",
   "description": "Experimental multi-agent Codex orchestration SDK for coding workflows.",
   "license": "MIT",

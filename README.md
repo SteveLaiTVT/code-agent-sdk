@@ -16,7 +16,7 @@ This project is early-stage infrastructure. The mock runner is useful for local 
 ## Install
 
 ```sh
-npm install @stevelife/code-agent-sdk
+npm install @steve-life/code-agent-sdk
 ```
 
 Node.js 18 or newer is required.
@@ -24,7 +24,7 @@ Node.js 18 or newer is required.
 ## Quick Start
 
 ```ts
-import { runCodingTask } from "@stevelife/code-agent-sdk";
+import { runCodingTask } from "@steve-life/code-agent-sdk";
 
 const result = await runCodingTask(
   "Build a playable snake game. Put pure game logic in small functions.",
@@ -39,7 +39,7 @@ console.log(result.summary);
 For UIs that need to render the orchestration process, use the streamed API:
 
 ```ts
-import { runCodingTaskStreamed } from "@stevelife/code-agent-sdk";
+import { runCodingTaskStreamed } from "@steve-life/code-agent-sdk";
 
 const stream = await runCodingTaskStreamed(
   "Build a playable snake game. Put pure game logic in small functions.",
