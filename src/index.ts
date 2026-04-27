@@ -34,6 +34,11 @@ export async function runCodingTask(
   branch: string,
   options: RunCodingTaskOptions = {}
 ): Promise<OrchestrationResult> {
+  if (options.orchestrator?.planReview?.mode === "manual") {
+    throw new Error(
+      "Manual plan review requires runCodingTaskStreamed() so the caller can approve, revise, or cancel the plan."
+    );
+  }
   const { orchestrator, project } = await createCodingTaskContext(repo, branch, options);
   return orchestrator.run(message, project);
 }

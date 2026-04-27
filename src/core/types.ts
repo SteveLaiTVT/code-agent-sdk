@@ -62,6 +62,7 @@ export interface TaskContract {
   forbiddenPaths: string[];
   dependencies: string[];
   acceptanceCriteria: string[];
+  validationTools?: string[];
   verificationCommands: string[];
   riskLevel: RiskLevel;
   expectedOutputs?: string[];
@@ -78,6 +79,13 @@ export interface TaskDAG {
   dagId: string;
   tasks: TaskContract[];
   edges: TaskDAGEdge[];
+}
+
+export interface PlanRevisionContext {
+  originalRequirement: string;
+  previousDag: TaskDAG;
+  feedback: string;
+  revisionIndex: number;
 }
 
 export interface ValidationIssue {
@@ -140,7 +148,7 @@ export type TaskStatus =
   | "failed";
 
 export interface OrchestrationResult {
-  status: "pass" | "needs_changes" | "reject" | "failed";
+  status: "pass" | "needs_changes" | "reject" | "failed" | "cancelled";
   dag: TaskDAG;
   taskResults: import("../agents/worker.js").WorkerResult[];
   mergeResults: MergeResult[];
@@ -182,6 +190,28 @@ export interface ModelUsageSummary {
   totals: Omit<ModelUsageStats, "model">;
 }
 
+export type PlanReviewMode = "auto" | "manual";
+
+export type PlanReviewAction = "approve" | "revise" | "cancel";
+
+export interface PlanReviewOption {
+  action: PlanReviewAction;
+  label: string;
+  description: string;
+  requiresFeedback: boolean;
+}
+
+export interface PlanReviewConfig {
+  mode: PlanReviewMode;
+  options?: PlanReviewOption[];
+}
+
+export interface PlanReviewController {
+  approve(): void;
+  revise(feedback: string): void;
+  cancel(reason?: string): void;
+}
+
 export type OrchestrationEventSink = (event: OrchestrationEvent) => void;
 
 export interface ModelRunTelemetry {
@@ -221,6 +251,29 @@ export type OrchestrationEvent =
       error: string;
     })
   | (OrchestrationEventBase & {
+      type: "plan.review.required";
+      dag: TaskDAG;
+      revisionIndex: number;
+      options: PlanReviewOption[];
+    })
+  | (OrchestrationEventBase & {
+      type: "plan.review.approved";
+      dag: TaskDAG;
+      revisionIndex: number;
+    })
+  | (OrchestrationEventBase & {
+      type: "plan.review.revision_requested";
+      dag: TaskDAG;
+      revisionIndex: number;
+      feedback: string;
+    })
+  | (OrchestrationEventBase & {
+      type: "plan.review.cancelled";
+      dag: TaskDAG;
+      revisionIndex: number;
+      reason?: string;
+    })
+  | (OrchestrationEventBase & {
       type: "task.started";
       task: TaskContract;
       workerId: string;
@@ -239,6 +292,14 @@ export type OrchestrationEvent =
       workerId: string;
       threadRunId?: string;
       error: string;
+    })
+  | (OrchestrationEventBase & {
+      type: "task.validation.completed";
+      task: TaskContract;
+      workerId: string;
+      threadRunId?: string;
+      stage: "pre-merge";
+      result: VerificationResult;
     })
   | (OrchestrationEventBase & {
       type: "merge.completed";
@@ -288,4 +349,5 @@ export type OrchestrationEvent =
 export interface OrchestrationStream {
   events: AsyncIterable<OrchestrationEvent>;
   result: Promise<OrchestrationResult>;
+  planReview?: PlanReviewController;
 }

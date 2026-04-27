@@ -20,7 +20,13 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { emitThreadEvent } from "../core/orchestration-stream.js";
-import type { AgentRole, ModelRunTelemetry, TaskContract, TaskDAG } from "../core/types.js";
+import type {
+  AgentRole,
+  ModelRunTelemetry,
+  PlanRevisionContext,
+  TaskContract,
+  TaskDAG,
+} from "../core/types.js";
 import type { ReviewResult, ReviewType } from "../review/review-types.js";
 
 const execFileAsync = promisify(execFile);
@@ -71,7 +77,7 @@ export class CodexModelRunnerAdapter implements ModelRunner {
 
     const result = await runThreadStreamed(
       thread,
-      createPlannerPrompt(requirement),
+      createPlannerPrompt(requirement, context.planRevision),
       {
         outputSchema: taskDagSchema,
       },
@@ -225,8 +231,11 @@ function reasoningForTask(task: TaskContract): ThreadOptions["modelReasoningEffo
   return task.reasoningEffort ?? reasoningForRole(task.role);
 }
 
-function createPlannerPrompt(requirement: string): string {
-  return [
+function createPlannerPrompt(
+  requirement: string,
+  planRevision?: PlanRevisionContext
+): string {
+  const lines = [
     "You are the planner agent in a multi-model coding orchestration system.",
     "Read the repository and split the user's coding requirement into a TaskDAG.",
     "",
@@ -237,6 +246,10 @@ function createPlannerPrompt(requirement: string): string {
     "- Use screen-worker tasks for state, orchestration, app wiring, routing, lifecycle, and complex integration.",
     "- For every task, set model to the exact model string that should run that task.",
     "- Prefer gpt-5.3-codex-spark for tiny pure component-worker tasks, gpt-5.4-mini for layout-worker tasks, and gpt-5.5 for planner/reviewer/high-risk integration tasks.",
+    "- For every task, set validationTools to the project-specific validation tools that should be used, such as npm, pnpm, yarn, gradle, xcodebuild, flutter, dart, pytest, cargo, go, or custom scripts. Use an empty array only when no validation applies.",
+    "- Put project-specific syntax, typecheck, compile, lint, or focused test commands in each implementation task's verificationCommands so patches can be validated before merge.",
+    "- Do not assume Node.js. Choose validation tools and commands from the repository's actual platform and scripts.",
+    "- If the user names global verification commands, include the relevant command on implementation tasks as well as verifier tasks when it can run against a single patch.",
     "- Add verifier and reviewer tasks after implementation tasks.",
     "- Reviewer tasks must depend on every implementation task.",
     "- Do not include projectType.",
@@ -246,7 +259,25 @@ function createPlannerPrompt(requirement: string): string {
     "- Keep forbiddenPaths populated with .env, .git, node_modules, dist, build, .next, coverage.",
     "",
     `Requirement:\n${requirement}`,
-  ].join("\n");
+  ];
+
+  if (planRevision) {
+    lines.push(
+      "",
+      `Plan revision index: ${planRevision.revisionIndex}`,
+      "",
+      "The previous TaskDAG was reviewed by the caller and needs revision.",
+      "Keep the original requirement, but incorporate the caller feedback below.",
+      "",
+      "Caller feedback:",
+      planRevision.feedback,
+      "",
+      "Previous TaskDAG:",
+      JSON.stringify(planRevision.previousDag, null, 2)
+    );
+  }
+
+  return lines.join("\n");
 }
 
 function createWorkerPrompt(task: TaskContract, model: string): string {
@@ -371,6 +402,7 @@ const taskContractSchema = {
     forbiddenPaths: stringArraySchema,
     dependencies: stringArraySchema,
     acceptanceCriteria: stringArraySchema,
+    validationTools: stringArraySchema,
     verificationCommands: stringArraySchema,
     riskLevel: { type: "string", enum: ["low", "medium", "high", "critical"] },
     expectedOutputs: stringArraySchema,
@@ -381,6 +413,7 @@ const taskContractSchema = {
     "title",
     "role",
     "model",
+    "modelTier",
     "reasoningEffort",
     "objective",
     "readPaths",
@@ -388,6 +421,7 @@ const taskContractSchema = {
     "forbiddenPaths",
     "dependencies",
     "acceptanceCriteria",
+    "validationTools",
     "verificationCommands",
     "riskLevel",
     "expectedOutputs",

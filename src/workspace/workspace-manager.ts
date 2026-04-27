@@ -83,6 +83,31 @@ export class WorkspaceManager {
     return workspacePath;
   }
 
+  async createValidationWorkspace(project: ProjectSpace, validationId: string): Promise<string> {
+    const baseDir = resolveInsideProject(project.root, ".agent-orchestrator/validation-workspaces");
+    await mkdir(baseDir, { recursive: true });
+    const workspacePath = path.join(
+      baseDir,
+      `${validationId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    assertInsideProject(project.root, workspacePath);
+    await mkdir(workspacePath, { recursive: true });
+    await copyProjectSnapshot(project.root, workspacePath);
+    await execFileAsync("git", ["-C", workspacePath, "init", "-b", "main"], { encoding: "utf8" });
+    await execFileAsync("git", ["-C", workspacePath, "add", "."], { encoding: "utf8" });
+    await execFileAsync("git", ["-C", workspacePath, "commit", "-m", "validation snapshot"], {
+      encoding: "utf8",
+    }).catch(() => undefined);
+    return workspacePath;
+  }
+
+  async cleanupValidationWorkspace(workspacePath: string): Promise<void> {
+    if (this.keepWorkspaces) {
+      return;
+    }
+    await rm(workspacePath, { recursive: true, force: true });
+  }
+
   async generatePatch(taskWorkspace: string, _projectRoot: string, taskId: string): Promise<string> {
     const patchDir = path.join(taskWorkspace, ".agent-orchestrator", "patches");
     const patchPath = path.join(patchDir, `${taskId}.mock-patch.json`);
