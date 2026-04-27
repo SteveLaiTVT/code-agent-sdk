@@ -1,0 +1,79 @@
+name: Publish npm package
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Build, test, and publish
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and test
+        run: pnpm test
+
+      - name: Check npm package version
+        id: npm_version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          package_spec="${package_name}@${package_version}"
+
+          echo "package_name=${package_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=${package_version}" >> "$GITHUB_OUTPUT"
+
+          set +e
+          view_output="$(npm view "${package_spec}" version 2>&1)"
+          view_status=$?
+          set -e
+
+          if [ "$view_status" -eq 0 ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "${package_spec} already exists on npm. Skipping publish."
+          elif echo "$view_output" | grep -q "E404"; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "${package_spec} is not published yet. Publishing."
+          else
+            echo "$view_output"
+            exit "$view_status"
+          fi
+
+      - name: Publish to npm
+        if: steps.npm_version.outputs.published == 'false'
+        run: npm publish --access public --provenance
+
+      - name: Report skipped publish
+        if: steps.npm_version.outputs.published == 'true'
+        run: |
+          echo "Skipped npm publish because ${{ steps.npm_version.outputs.package_name }}@${{ steps.npm_version.outputs.package_version }} is already published."

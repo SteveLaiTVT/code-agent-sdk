@@ -505,6 +505,23 @@ npm run build
 npm pack --dry-run
 ```
 
+### Automated npm publishing
+
+Pushes to `main` run the GitHub Actions workflow in
+`.github/workflows/publish-npm.yml`.
+
+The workflow:
+
+- installs dependencies with `pnpm install --frozen-lockfile`
+- runs `pnpm test`
+- checks whether the current `package.json` version already exists on npm
+- publishes with `npm publish --access public --provenance` only when that
+  version is not published yet
+
+Configure the repository secret `NPM_TOKEN` with an npm automation token before
+the first automated release. To release a new package version, update
+`package.json`'s `version`, then push or merge the change to `main`.
+
 ## Current Mocked Or Experimental Parts
 
 - `MockModelRunner` returns a fixed task-card `TaskDAG`.
