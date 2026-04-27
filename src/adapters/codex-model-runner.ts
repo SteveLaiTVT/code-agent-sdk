@@ -20,6 +20,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { emitThreadEvent } from "../core/orchestration-stream.js";
+import { createCodexClientOptions } from "../common/codex-env.js";
 import type {
   AgentRole,
   ModelRunTelemetry,
@@ -52,7 +53,7 @@ export class CodexModelRunnerAdapter implements ModelRunner {
   readonly config: CodexModelRunnerAdapterConfig;
   private readonly codex: Codex;
 
-  constructor(config: Partial<CodexModelRunnerAdapterConfig> = {}, codex = new Codex()) {
+  constructor(config: Partial<CodexModelRunnerAdapterConfig> = {}, codex = new Codex(createCodexClientOptions())) {
     this.config = {
       ...defaultCodexModelRunnerAdapterConfig,
       ...config,

@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { Codex, type RunResult } from "@openai/codex-sdk";
 import path from "node:path";
 import { AgentOrchestrator, type AgentOrchestratorOptions } from "./agents/orchestrator.js";
+import { createCodexClientOptions } from "./common/codex-env.js";
 import {
   CodexModelRunnerAdapter,
   type CodexModelRunnerAdapterConfig,
@@ -87,7 +88,7 @@ export async function runSingleCodexTask(
   branch: string
 ): Promise<RunResult> {
   await ensureBranch(repo, branch);
-  const codex = new Codex();
+  const codex = new Codex(createCodexClientOptions());
   const thread = codex.startThread({ workingDirectory: repo });
   return thread.run(message);
 }
