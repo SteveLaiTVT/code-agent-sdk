@@ -16,8 +16,11 @@ function makeTask(taskId, overrides = {}) {
     forbiddenPaths: [".env", ".git", "node_modules"],
     dependencies: [],
     acceptanceCriteria: [],
+    validationTools: [],
     verificationCommands: [],
     riskLevel: "low",
+    expectedOutputs: [],
+    notes: [],
     ...overrides,
   };
 }
@@ -72,6 +75,18 @@ describe("task dag", () => {
     const result = validateTaskDAG(dag);
     assert.equal(result.valid, false);
     assert.match(result.errors.join("\n"), /cycle/);
+  });
+
+  it("rejects task contracts that omit required planning metadata", () => {
+    const dag = normalDag();
+    delete dag.tasks[0].validationTools;
+    delete dag.tasks[0].expectedOutputs;
+    delete dag.tasks[0].notes;
+    const result = validateTaskDAG(dag);
+    assert.equal(result.valid, false);
+    assert.match(result.errors.join("\n"), /validationTools/);
+    assert.match(result.errors.join("\n"), /expectedOutputs/);
+    assert.match(result.errors.join("\n"), /notes/);
   });
 
   it("rejects duplicate taskId", () => {

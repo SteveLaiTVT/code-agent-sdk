@@ -54,19 +54,19 @@ export interface TaskContract {
   title: string;
   role: AgentRole;
   model: string;
-  modelTier?: ModelTier;
-  reasoningEffort?: ReasoningEffort;
+  modelTier: ModelTier;
+  reasoningEffort: ReasoningEffort;
   objective: string;
   readPaths: string[];
   writePaths: string[];
   forbiddenPaths: string[];
   dependencies: string[];
   acceptanceCriteria: string[];
-  validationTools?: string[];
+  validationTools: string[];
   verificationCommands: string[];
   riskLevel: RiskLevel;
-  expectedOutputs?: string[];
-  notes?: string[];
+  expectedOutputs: string[];
+  notes: string[];
 }
 
 export interface TaskDAGEdge {

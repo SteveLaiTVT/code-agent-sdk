@@ -79,6 +79,8 @@ export class MockModelRunner implements ModelRunner {
         validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "low",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "spark-task-card",
@@ -96,6 +98,8 @@ export class MockModelRunner implements ModelRunner {
         validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "low",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "mini-task-card-grid",
@@ -113,6 +117,8 @@ export class MockModelRunner implements ModelRunner {
         validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "medium",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "gpt-task-board-screen",
@@ -130,6 +136,8 @@ export class MockModelRunner implements ModelRunner {
         validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "medium",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "verify-full-chain",
@@ -147,6 +155,8 @@ export class MockModelRunner implements ModelRunner {
         validationTools: ["npm"],
         verificationCommands: ["npm run build", "npm test"],
         riskLevel: "low",
+        expectedOutputs: [],
+        notes: [],
       },
       ...reviewTaskIds.map((taskId): TaskContract => {
         const reviewType = taskId.replace("review-", "") as ReviewResult["reviewType"];

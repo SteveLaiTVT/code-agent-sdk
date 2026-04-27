@@ -379,18 +379,20 @@ export class AgentOrchestrator {
       );
     }
 
-    const partialVerificationCommands = uniqueCommands(
-      implementationTasks.flatMap((task) => task.verificationCommands)
-    );
-    if (partialVerificationCommands.length > 0) {
-      const partialVerification = await this.runVerification(
-        project,
-        partialVerificationCommands,
-        "partial-verifier",
-        runId,
-        emit
+    if (!this.preMergeValidation.enabled) {
+      const partialVerificationCommands = uniqueCommands(
+        implementationTasks.flatMap((task) => task.verificationCommands)
       );
-      verificationResults.push(partialVerification);
+      if (partialVerificationCommands.length > 0) {
+        const partialVerification = await this.runVerification(
+          project,
+          partialVerificationCommands,
+          "partial-verifier",
+          runId,
+          emit
+        );
+        verificationResults.push(partialVerification);
+      }
     }
 
     for (const verifierTask of verifierTasks) {

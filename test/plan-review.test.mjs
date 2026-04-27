@@ -24,8 +24,11 @@ function componentTask(taskId, model = "gpt-5.3-codex-spark") {
     forbiddenPaths: [".env", ".git", "node_modules"],
     dependencies: [],
     acceptanceCriteria: [],
+    validationTools: [],
     verificationCommands: [],
     riskLevel: "low",
+    expectedOutputs: [],
+    notes: [],
   };
 }
 

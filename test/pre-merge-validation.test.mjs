@@ -19,6 +19,7 @@ function implementationTask() {
     forbiddenPaths: [".env", ".git", "node_modules"],
     dependencies: [],
     acceptanceCriteria: ["The SDK should reject syntax-invalid output before merge."],
+    validationTools: ["npm"],
     verificationCommands: ["npm run build"],
     riskLevel: "low",
     expectedOutputs: [],
@@ -117,5 +118,71 @@ describe("pre-merge validation", () => {
     assert.equal(result.taskResults[0].verification.status, "failed");
     assert.ok(events.some((event) => event.type === "task.validation.completed"));
     await assert.rejects(readFile(path.join(targetProject.root, task.writePaths[0]), "utf8"));
+  });
+
+  it("does not replay task-level verification after merge when pre-merge validation is enabled", async () => {
+    const task = {
+      ...implementationTask(),
+      taskId: "write-good-js",
+      title: "Write valid JavaScript",
+      objective: "Write a valid JavaScript module.",
+      writePaths: ["src/good.mjs"],
+      acceptanceCriteria: ["The SDK should validate once before merge and not replay the same task command after merge."],
+    };
+
+    class GoodPatchRunner {
+      async runPlanner() {
+        return {
+          dagId: "good-js-dag",
+          tasks: [task],
+          edges: [],
+        };
+      }
+
+      async runWorker(input) {
+        return {
+          summary: "Wrote valid JavaScript.",
+          changedFiles: task.writePaths,
+          logs: [],
+          patchPath: await writeMockPatch(input.workspacePath, task, "export const working = 1;\n"),
+        };
+      }
+
+      async runReviewer() {
+        throw new Error("Reviewer should not run for this focused pre-merge validation test.");
+      }
+    }
+
+    const targetProject = await project();
+    await writeFile(
+      path.join(targetProject.root, "package.json"),
+      JSON.stringify(
+        {
+          type: "module",
+          scripts: {
+            build: "node --check src/good.mjs",
+          },
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+
+    const orchestrator = new AgentOrchestrator({
+      modelRunner: new GoodPatchRunner(),
+      workspaceManager: new WorkspaceManager({ strategy: "mock" }),
+      executeVerificationCommands: true,
+    });
+
+    const result = await orchestrator.run("write valid js", targetProject);
+
+    assert.equal(result.status, "pass");
+    assert.equal(result.taskResults[0].verification.status, "passed");
+    assert.equal(result.verificationResults.length, 0);
+    assert.equal(
+      await readFile(path.join(targetProject.root, task.writePaths[0]), "utf8"),
+      "export const working = 1;\n"
+    );
   });
 });
