@@ -124,6 +124,61 @@ The stream exposes orchestration-level events and raw Codex SDK thread events.
 This is useful when the caller needs a replayable trace for each planner,
 worker, and reviewer thread.
 
+### Manual Plan Review
+
+Manual plan review is opt-in. When enabled, the orchestrator validates the
+planner's `TaskDAG`, emits `plan.review.required`, and waits before starting
+workers, merge, verification, or review.
+
+```ts
+const stream = await runCodingTaskStreamed(
+  "Refactor the settings screen.",
+  "/path/to/target-repo",
+  "main",
+  {
+    orchestrator: {
+      planReview: { mode: "manual" },
+    },
+  },
+);
+
+for await (const event of stream.events) {
+  if (event.type === "plan.review.required") {
+    renderPlan(event.dag, event.options);
+    stream.planReview?.approve();
+  }
+}
+```
+
+The controller supports `approve()`, `revise(feedback)`, and `cancel(reason)`.
+`revise()` sends feedback back to the planner and emits a new
+`plan.review.required` event for the revised DAG. `cancel()` completes the run
+with `status: "cancelled"` and does not create task workspaces or apply patches.
+Non-streamed APIs reject manual plan review because they cannot expose the
+controller.
+
+### Pre-Merge Validation
+
+Implementation patches are validated before they are merged into the target
+project. The SDK does not assume Node, Android, iOS, Flutter, or any other
+platform. The planner must set each task's `validationTools` and
+`verificationCommands`; those task-level commands run in a temporary validation
+workspace. The caller can add extra global commands for stricter gates:
+
+```ts
+const stream = await runCodingTaskStreamed(message, repo, "main", {
+  orchestrator: {
+    preMergeValidation: {
+      commands: ["npm run build"],
+    },
+  },
+});
+```
+
+If pre-merge validation fails, the task fails and the patch is not merged into
+the project. The stream emits `task.validation.completed` with the command
+results.
+
 ## Public API
 
 | API | Purpose |
@@ -216,8 +271,8 @@ interface TaskDAG {
 ```
 
 Each `TaskContract` defines the worker role, model, file scope, dependencies,
-acceptance criteria, verification commands, and risk level for one unit of
-work.
+acceptance criteria, validation tools, verification commands, and risk level for
+one unit of work.
 
 ```ts
 interface TaskContract {
@@ -231,6 +286,7 @@ interface TaskContract {
   forbiddenPaths: string[];
   dependencies: string[];
   acceptanceCriteria: string[];
+  validationTools?: string[];
   verificationCommands: string[];
   riskLevel: "low" | "medium" | "high" | "critical";
 }

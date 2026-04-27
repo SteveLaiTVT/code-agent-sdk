@@ -128,6 +128,57 @@ console.log(result.modelUsage.byModel);
 `stream.events` 是异步迭代器，适合边运行边渲染。`stream.result` 是最终结果的
 Promise，适合在任务结束后落库、生成报告或更新 PR 评论。
 
+### Plan 审核模式
+
+Plan 审核是显式开启的模式。开启后，orchestrator 会先让 planner 生成并校验
+`TaskDAG`，然后发出 `plan.review.required`，在调用端放行之前不会启动 worker、
+merge、verification 或 review。
+
+```ts
+const stream = await runCodingTaskStreamed(
+  "重构设置页。",
+  "/path/to/target-repo",
+  "main",
+  {
+    orchestrator: {
+      planReview: { mode: "manual" },
+    },
+  },
+);
+
+for await (const event of stream.events) {
+  if (event.type === "plan.review.required") {
+    renderPlan(event.dag, event.options);
+    stream.planReview?.approve();
+  }
+}
+```
+
+`stream.planReview` 提供 `approve()`、`revise(feedback)` 和 `cancel(reason)`。
+`revise()` 会把反馈交回 planner 重新生成 DAG，并再次进入审核；`cancel()` 会以
+`status: "cancelled"` 结束 run，不创建任务工作区、不应用 patch。manual 模式不能用
+非流式 API，因为普通 Promise 没有 controller。
+
+### Pre-Merge Validation
+
+实现任务的 patch 会先在临时 validation workspace 里验证，验证通过后才 merge 到目标
+项目。SDK 不假设项目一定是 Node，也不假设是 Android、iOS、Flutter 或 Web。planner
+需要在每个 task 上设置 `validationTools` 和 `verificationCommands`，SDK 只负责在
+validation workspace 里执行这些 task-level 命令。调用端也可以加更严格的全局命令：
+
+```ts
+const stream = await runCodingTaskStreamed(message, repo, "main", {
+  orchestrator: {
+    preMergeValidation: {
+      commands: ["npm run build"],
+    },
+  },
+});
+```
+
+如果 pre-merge validation 失败，当前 task 会失败，patch 不会进入目标项目。事件流会发出
+`task.validation.completed`，里面带具体命令结果。
+
 ## 5. 事件类型
 
 流式 API 会发出这些事件：
@@ -210,6 +261,7 @@ interface TaskContract {
   forbiddenPaths: string[];
   dependencies: string[];
   acceptanceCriteria: string[];
+  validationTools?: string[];
   verificationCommands: string[];
   riskLevel: "low" | "medium" | "high" | "critical";
 }
@@ -226,6 +278,7 @@ interface TaskContract {
 | `forbiddenPaths` | 明确禁止访问或修改的路径。 |
 | `dependencies` | 当前任务依赖的上游任务。 |
 | `acceptanceCriteria` | 完成标准。 |
+| `validationTools` | planner 选择的验证工具，例如 `gradle`、`xcodebuild`、`flutter`、`npm` 或项目脚本。 |
 | `verificationCommands` | 该任务相关的验证命令。 |
 | `riskLevel` | 风险等级，用于调度和 review 策略。 |
 
