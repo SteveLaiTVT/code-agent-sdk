@@ -2,6 +2,7 @@ import type { ReviewResult } from "../review/review-types.js";
 import { emitThreadEvent } from "../core/orchestration-stream.js";
 import type {
   ModelRunTelemetry,
+  PlanRevisionContext,
   ProjectSpace,
   TaskContract,
   TaskDAG,
@@ -33,6 +34,7 @@ export interface ModelRunnerReviewerInput {
 export interface ModelRunnerPlannerContext {
   project?: ProjectSpace;
   telemetry?: ModelRunTelemetry;
+  planRevision?: PlanRevisionContext;
 }
 
 export interface ModelRunner {
@@ -74,8 +76,11 @@ export class MockModelRunner implements ModelRunner {
         forbiddenPaths: ["package.json", ".env", ".git", "node_modules"],
         dependencies: [],
         acceptanceCriteria: ["StatusBadge is isolated and has no layout or screen orchestration logic."],
+        validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "low",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "spark-task-card",
@@ -90,8 +95,11 @@ export class MockModelRunner implements ModelRunner {
         forbiddenPaths: ["package.json", ".env", ".git", "node_modules"],
         dependencies: [],
         acceptanceCriteria: ["TaskCard is isolated and delegates status rendering to StatusBadge contract."],
+        validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "low",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "mini-task-card-grid",
@@ -106,8 +114,11 @@ export class MockModelRunner implements ModelRunner {
         forbiddenPaths: ["package.json", ".env", ".git", "node_modules"],
         dependencies: ["spark-status-badge", "spark-task-card"],
         acceptanceCriteria: ["Layout depends on component contracts and avoids screen-level state loading."],
+        validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "medium",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "gpt-task-board-screen",
@@ -122,8 +133,11 @@ export class MockModelRunner implements ModelRunner {
         forbiddenPaths: ["package.json", ".env", ".git", "node_modules"],
         dependencies: ["mini-task-card-grid"],
         acceptanceCriteria: ["Screen owns data and orchestration; layout remains presentational."],
+        validationTools: ["npm"],
         verificationCommands: ["npm run build"],
         riskLevel: "medium",
+        expectedOutputs: [],
+        notes: [],
       },
       {
         taskId: "verify-full-chain",
@@ -138,8 +152,11 @@ export class MockModelRunner implements ModelRunner {
         forbiddenPaths: ["src", "package.json", ".env", ".git", "node_modules"],
         dependencies: implementationTaskIds,
         acceptanceCriteria: ["Verification result is structured."],
+        validationTools: ["npm"],
         verificationCommands: ["npm run build", "npm test"],
         riskLevel: "low",
+        expectedOutputs: [],
+        notes: [],
       },
       ...reviewTaskIds.map((taskId): TaskContract => {
         const reviewType = taskId.replace("review-", "") as ReviewResult["reviewType"];
@@ -156,6 +173,7 @@ export class MockModelRunner implements ModelRunner {
           forbiddenPaths: [".env", ".git", "node_modules"],
           dependencies: implementationTaskIds,
           acceptanceCriteria: ["Review report is structured and includes blocking/non-blocking issues."],
+          validationTools: reviewType === "integration" ? ["npm"] : [],
           verificationCommands: reviewType === "integration" ? ["npm run build"] : [],
           riskLevel: "low",
           expectedOutputs: [`.agent-orchestrator/reviews/${taskId}.json`],

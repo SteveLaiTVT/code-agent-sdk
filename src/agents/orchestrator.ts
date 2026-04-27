@@ -19,6 +19,10 @@ import type {
   OrchestrationEventSink,
   OrchestrationResult,
   OrchestrationStream,
+  PlanReviewConfig,
+  PlanReviewController,
+  PlanReviewOption,
+  PlanRevisionContext,
   ProjectSpace,
   TaskContract,
   TaskDAG,
@@ -36,6 +40,8 @@ export interface AgentOrchestratorOptions {
   workspaceManager?: WorkspaceManager;
   mergeBroker?: MergeBroker;
   plannerModel?: string;
+  planReview?: PlanReviewConfig;
+  preMergeValidation?: PreMergeValidationOptions;
   maxSparkWorkers?: number;
   maxMiniWorkers?: number;
   maxGpt55Workers?: number;
@@ -47,13 +53,50 @@ interface ImplementationRunResult {
   taskResults: WorkerResult[];
   mergeResults: MergeResult[];
   success: boolean;
+  summary?: string;
 }
+
+export interface PreMergeValidationOptions {
+  enabled?: boolean;
+  commands?: string[];
+}
+
+type PlanReviewDecision =
+  | { action: "approve" }
+  | { action: "revise"; feedback: string }
+  | { action: "cancel"; reason?: string };
+
+const DEFAULT_PLAN_REVIEW_OPTIONS: PlanReviewOption[] = [
+  {
+    action: "approve",
+    label: "Approve",
+    description: "Continue with this TaskDAG and start implementation.",
+    requiresFeedback: false,
+  },
+  {
+    action: "revise",
+    label: "Revise",
+    description: "Send feedback to the planner and request a revised TaskDAG.",
+    requiresFeedback: true,
+  },
+  {
+    action: "cancel",
+    label: "Cancel",
+    description: "End this run without executing code.",
+    requiresFeedback: false,
+  },
+];
+
+const MANUAL_PLAN_REVIEW_RUN_ERROR =
+  "Manual plan review requires the streamed API. Use runStreamed() or runCodingTaskStreamed() so the caller can approve, revise, or cancel the plan.";
 
 export class AgentOrchestrator {
   private readonly modelRunner: ModelRunner;
   private readonly workspaceManager: WorkspaceManager;
   private readonly mergeBroker: MergeBroker;
   private readonly plannerModel: string;
+  private readonly planReview: PlanReviewConfig;
+  private readonly preMergeValidation: Required<PreMergeValidationOptions>;
   private readonly maxSparkWorkers: number;
   private readonly maxMiniWorkers: number;
   private readonly maxGpt55Workers: number;
@@ -65,6 +108,11 @@ export class AgentOrchestrator {
     this.workspaceManager = options.workspaceManager ?? new WorkspaceManager();
     this.mergeBroker = options.mergeBroker ?? new MergeBroker({ workspaceManager: this.workspaceManager });
     this.plannerModel = options.plannerModel ?? getPlannerModelFromRunner(this.modelRunner) ?? "gpt-5.5";
+    this.planReview = options.planReview ?? { mode: "auto" };
+    this.preMergeValidation = {
+      enabled: options.preMergeValidation?.enabled ?? true,
+      commands: options.preMergeValidation?.commands ?? [],
+    };
     this.maxSparkWorkers = options.maxSparkWorkers ?? 4;
     this.maxMiniWorkers = options.maxMiniWorkers ?? 2;
     this.maxGpt55Workers = options.maxGpt55Workers ?? 1;
@@ -76,12 +124,21 @@ export class AgentOrchestrator {
     const runId = createRunId();
     const queue = new AsyncEventQueue<OrchestrationEvent>();
     const eventLog: OrchestrationEvent[] = [];
+    const planReviewCoordinator =
+      this.planReview.mode === "manual" ? new PlanReviewCoordinator() : undefined;
     const emit: OrchestrationEventSink = (event) => {
       eventLog.push(event);
       queue.push(event);
     };
 
-    const result = this.runInternal(requirement, project, runId, emit, eventLog)
+    const result = this.runInternal(
+      requirement,
+      project,
+      runId,
+      emit,
+      eventLog,
+      planReviewCoordinator
+    )
       .then((orchestrationResult) => {
         if (orchestrationResult.status === "failed") {
           emit({
@@ -128,10 +185,14 @@ export class AgentOrchestrator {
     return {
       events: queue,
       result,
+      planReview: planReviewCoordinator,
     };
   }
 
   async run(requirement: string, project: ProjectSpace): Promise<OrchestrationResult> {
+    if (this.planReview.mode === "manual") {
+      throw new Error(MANUAL_PLAN_REVIEW_RUN_ERROR);
+    }
     const stream = this.runStreamed(requirement, project);
     return collectOrchestrationStream(stream.events);
   }
@@ -141,7 +202,8 @@ export class AgentOrchestrator {
     project: ProjectSpace,
     runId: string,
     emit: OrchestrationEventSink,
-    eventLog: OrchestrationEvent[]
+    eventLog: OrchestrationEvent[],
+    planReviewCoordinator?: PlanReviewCoordinator
   ): Promise<OrchestrationResult> {
     const taskResults: WorkerResult[] = [];
     const mergeResults: MergeResult[] = [];
@@ -156,82 +218,141 @@ export class AgentOrchestrator {
       project,
     });
 
-    const plannerTelemetry = this.createTelemetry({
-      runId,
-      threadRunId: createThreadRunId(runId, "planner"),
-      role: "planner",
-      model: this.plannerModel,
-      reasoningEffort: "xhigh",
-      emit,
-    });
+    let approvedDag: TaskDAG | undefined;
+    let revisionIndex = 0;
+    let planRevision: PlanRevisionContext | undefined;
 
-    let dag: TaskDAG;
-    try {
-      emit({
-        type: "planner.started",
+    while (!approvedDag) {
+      const plannerTelemetry = this.createTelemetry({
         runId,
-        timestamp: now(),
+        threadRunId: createThreadRunId(runId, `planner-${revisionIndex}`),
+        role: "planner",
         model: this.plannerModel,
         reasoningEffort: "xhigh",
+        emit,
       });
-      dag = await this.modelRunner.runPlanner(requirement, { project, telemetry: plannerTelemetry });
-      emit({
-        type: "planner.completed",
-        runId,
-        timestamp: now(),
-        dag,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      emit({
-        type: "planner.failed",
-        runId,
-        timestamp: now(),
-        error: message,
-      });
-      return this.finishResult(
-        "failed",
-        { dagId: "planner-failed", tasks: [], edges: [] },
-        taskResults,
-        mergeResults,
-        verificationResults,
-        reviewResults,
-        `Planner failed: ${message}`,
-        eventLog
-      );
-    }
 
-    const dagValidation = validateTaskDAG(dag);
-    if (!dagValidation.valid) {
-      return this.finishResult(
-        "failed",
-        dag,
-        taskResults,
-        mergeResults,
-        verificationResults,
-        reviewResults,
-        `TaskDAG validation failed: ${dagValidation.errors.join("; ")}`,
-        eventLog
-      );
-    }
-
-    try {
-      for (const task of dag.tasks) {
-        assertTaskScopeSafe(project, task);
+      let plannedDag: TaskDAG;
+      try {
+        emit({
+          type: "planner.started",
+          runId,
+          timestamp: now(),
+          model: this.plannerModel,
+          reasoningEffort: "xhigh",
+        });
+        plannedDag = await this.modelRunner.runPlanner(requirement, {
+          project,
+          telemetry: plannerTelemetry,
+          planRevision,
+        });
+        emit({
+          type: "planner.completed",
+          runId,
+          timestamp: now(),
+          dag: plannedDag,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        emit({
+          type: "planner.failed",
+          runId,
+          timestamp: now(),
+          error: message,
+        });
+        return this.finishResult(
+          "failed",
+          { dagId: "planner-failed", tasks: [], edges: [] },
+          taskResults,
+          mergeResults,
+          verificationResults,
+          reviewResults,
+          `Planner failed: ${message}`,
+          eventLog
+        );
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return this.finishResult(
-        "failed",
-        dag,
-        taskResults,
-        mergeResults,
-        verificationResults,
-        reviewResults,
-        `Task scope validation failed: ${message}`,
-        eventLog
-      );
+
+      const validationFailure = this.validatePlannedDag(project, plannedDag);
+      if (validationFailure) {
+        return this.finishResult(
+          "failed",
+          plannedDag,
+          taskResults,
+          mergeResults,
+          verificationResults,
+          reviewResults,
+          validationFailure,
+          eventLog
+        );
+      }
+
+      if (!planReviewCoordinator) {
+        approvedDag = plannedDag;
+        break;
+      }
+
+      const decisionPromise = planReviewCoordinator.waitForDecision();
+      emit({
+        type: "plan.review.required",
+        runId,
+        timestamp: now(),
+        dag: plannedDag,
+        revisionIndex,
+        options: this.planReviewOptions(),
+      });
+      const decision = await decisionPromise;
+
+      if (decision.action === "approve") {
+        emit({
+          type: "plan.review.approved",
+          runId,
+          timestamp: now(),
+          dag: plannedDag,
+          revisionIndex,
+        });
+        approvedDag = plannedDag;
+        break;
+      }
+
+      if (decision.action === "cancel") {
+        emit({
+          type: "plan.review.cancelled",
+          runId,
+          timestamp: now(),
+          dag: plannedDag,
+          revisionIndex,
+          reason: decision.reason,
+        });
+        return this.finishResult(
+          "cancelled",
+          plannedDag,
+          taskResults,
+          mergeResults,
+          verificationResults,
+          reviewResults,
+          decision.reason ? `Plan review cancelled: ${decision.reason}` : "Plan review cancelled.",
+          eventLog
+        );
+      }
+
+      emit({
+        type: "plan.review.revision_requested",
+        runId,
+        timestamp: now(),
+        dag: plannedDag,
+        revisionIndex,
+        feedback: decision.feedback,
+      });
+      revisionIndex += 1;
+      planRevision = {
+        originalRequirement: requirement,
+        previousDag: plannedDag,
+        feedback: decision.feedback,
+        revisionIndex,
+      };
     }
+
+    const dag = approvedDag;
 
     const implementationTasks = dag.tasks.filter(isImplementationTask);
     const verifierTasks = dag.tasks.filter((task) => task.role === "verifier");
@@ -253,23 +374,25 @@ export class AgentOrchestrator {
         mergeResults,
         verificationResults,
         reviewResults,
-        "Merge broker rejected or failed one or more worker patches.",
+        implementationRun.summary ?? "Merge broker rejected or failed one or more worker patches.",
         eventLog
       );
     }
 
-    const partialVerificationCommands = uniqueCommands(
-      implementationTasks.flatMap((task) => task.verificationCommands)
-    );
-    if (partialVerificationCommands.length > 0) {
-      const partialVerification = await this.runVerification(
-        project,
-        partialVerificationCommands,
-        "partial-verifier",
-        runId,
-        emit
+    if (!this.preMergeValidation.enabled) {
+      const partialVerificationCommands = uniqueCommands(
+        implementationTasks.flatMap((task) => task.verificationCommands)
       );
-      verificationResults.push(partialVerification);
+      if (partialVerificationCommands.length > 0) {
+        const partialVerification = await this.runVerification(
+          project,
+          partialVerificationCommands,
+          "partial-verifier",
+          runId,
+          emit
+        );
+        verificationResults.push(partialVerification);
+      }
     }
 
     for (const verifierTask of verifierTasks) {
@@ -320,6 +443,32 @@ export class AgentOrchestrator {
     );
   }
 
+  private validatePlannedDag(project: ProjectSpace, dag: TaskDAG): string | undefined {
+    const dagValidation = validateTaskDAG(dag);
+    if (!dagValidation.valid) {
+      return `TaskDAG validation failed: ${dagValidation.errors.join("; ")}`;
+    }
+
+    try {
+      for (const task of dag.tasks) {
+        assertTaskScopeSafe(project, task);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Task scope validation failed: ${message}`;
+    }
+
+    return undefined;
+  }
+
+  private planReviewOptions(): PlanReviewOption[] {
+    const options =
+      this.planReview.options && this.planReview.options.length > 0
+        ? this.planReview.options
+        : DEFAULT_PLAN_REVIEW_OPTIONS;
+    return options.map((option) => ({ ...option }));
+  }
+
   private async runImplementationDag(
     project: ProjectSpace,
     tasks: TaskContract[],
@@ -346,6 +495,16 @@ export class AgentOrchestrator {
       );
       taskResults.push(...batchResults);
 
+      const failedResult = batchResults.find((result) => result.status !== "success");
+      if (failedResult) {
+        return {
+          taskResults,
+          mergeResults,
+          success: false,
+          summary: failedResult.summary,
+        };
+      }
+
       const batchMergeResults = await this.mergeBroker.mergeMany(
         project,
         batch.map((task) => ({
@@ -368,7 +527,12 @@ export class AgentOrchestrator {
       mergeResults.push(...batchMergeResults);
 
       if (batchMergeResults.some((result) => result.status !== "merged")) {
-        return { taskResults, mergeResults, success: false };
+        return {
+          taskResults,
+          mergeResults,
+          success: false,
+          summary: "Merge broker rejected or failed one or more worker patches.",
+        };
       }
 
       for (const task of batch) {
@@ -428,7 +592,7 @@ export class AgentOrchestrator {
       threadRunId,
     });
     const workspacePath = await this.workspaceManager.createTaskWorkspace(project, task);
-    const result = await worker.run(task, {
+    let result = await worker.run(task, {
       project,
       workspacePath,
       codexOptions: createCodexOptions({
@@ -440,6 +604,36 @@ export class AgentOrchestrator {
       inputFiles: task.readPaths,
       telemetry,
     });
+
+    if (result.status === "success") {
+      const validation = await this.runPreMergeValidation(
+        project,
+        task,
+        result,
+        worker.workerId,
+        threadRunId,
+        runId,
+        emit
+      );
+      if (validation) {
+        result = {
+          ...result,
+          status: validation.status === "failed" ? "failed" : result.status,
+          verification: validation,
+          logs: [
+            ...result.logs,
+            ...validation.commands.map(
+              (command) => `${command.status}: ${command.command} - ${command.outputSummary}`
+            ),
+          ],
+          summary:
+            validation.status === "failed"
+              ? `Pre-merge validation failed for ${task.taskId}.`
+              : result.summary,
+        };
+      }
+    }
+
     if (result.status === "success") {
       emit({
         type: "task.completed",
@@ -462,6 +656,77 @@ export class AgentOrchestrator {
       });
     }
     return result;
+  }
+
+  private async runPreMergeValidation(
+    project: ProjectSpace,
+    task: TaskContract,
+    result: WorkerResult,
+    workerId: string,
+    threadRunId: string,
+    runId: string,
+    emit: OrchestrationEventSink
+  ): Promise<VerificationResult | undefined> {
+    const commands = this.preMergeValidationCommandsFor(task, result);
+    if (!this.preMergeValidation.enabled || commands.length === 0 || !result.patchPath) {
+      return undefined;
+    }
+
+    const validationWorkspace = await this.workspaceManager.createValidationWorkspace(
+      project,
+      `${task.taskId}-pre-merge`
+    );
+    try {
+      const validationProject: ProjectSpace = {
+        ...project,
+        root: validationWorkspace,
+      };
+      const applyResult = await this.workspaceManager.applyPatch(validationProject, result.patchPath);
+      let validation: VerificationResult;
+      if (applyResult.status === "failed") {
+        validation = {
+          status: "failed",
+          commands: [
+            {
+              command: "apply patch",
+              status: "failed",
+              outputSummary: applyResult.errors.join("\n") || applyResult.summary,
+            },
+          ],
+          summary: `Pre-merge validation could not apply patch for ${task.taskId}.`,
+        };
+      } else {
+        const verifier = new VerifierWorker({
+          workerId: `${workerId}-pre-merge-validation`,
+          executeCommands: this.executeVerificationCommands,
+        });
+        validation = await verifier.verify(commands, validationWorkspace);
+      }
+
+      emit({
+        type: "task.validation.completed",
+        runId,
+        timestamp: now(),
+        task,
+        workerId,
+        threadRunId,
+        stage: "pre-merge",
+        result: validation,
+      });
+      return validation;
+    } finally {
+      await this.workspaceManager.cleanupValidationWorkspace(validationWorkspace);
+    }
+  }
+
+  private preMergeValidationCommandsFor(task: TaskContract, result: WorkerResult): string[] {
+    if (!this.preMergeValidation.enabled) {
+      return [];
+    }
+    return uniqueCommands([
+      ...this.preMergeValidation.commands,
+      ...task.verificationCommands,
+    ]);
   }
 
   private createImplementationWorker(task: TaskContract, index: number): AgentWorker {
@@ -732,6 +997,46 @@ class AsyncEventQueue<T> implements AsyncIterable<T> {
         });
       },
     };
+  }
+}
+
+class PlanReviewCoordinator implements PlanReviewController {
+  private pending?: {
+    resolve: (decision: PlanReviewDecision) => void;
+  };
+
+  waitForDecision(): Promise<PlanReviewDecision> {
+    if (this.pending) {
+      throw new Error("A plan review decision is already pending.");
+    }
+    return new Promise<PlanReviewDecision>((resolve) => {
+      this.pending = { resolve };
+    });
+  }
+
+  approve(): void {
+    this.resolve({ action: "approve" });
+  }
+
+  revise(feedback: string): void {
+    const trimmed = feedback.trim();
+    if (!trimmed) {
+      throw new Error("Plan revision feedback is required.");
+    }
+    this.resolve({ action: "revise", feedback: trimmed });
+  }
+
+  cancel(reason?: string): void {
+    this.resolve({ action: "cancel", reason });
+  }
+
+  private resolve(decision: PlanReviewDecision): void {
+    if (!this.pending) {
+      throw new Error("No plan review is currently pending.");
+    }
+    const pending = this.pending;
+    this.pending = undefined;
+    pending.resolve(decision);
   }
 }
 

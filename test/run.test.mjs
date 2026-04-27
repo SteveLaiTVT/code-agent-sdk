@@ -28,7 +28,19 @@ describe("test()", () => {
     await writeFile(path.join(repo, "package.json"), '{"type":"module"}\n', "utf8");
     await execFileAsync("git", ["-C", repo, "init", "-b", "main"]);
     await execFileAsync("git", ["-C", repo, "add", "."]);
-    await execFileAsync("git", ["-C", repo, "commit", "-m", "init"]);
+    await execFileAsync(
+      "git",
+      ["-C", repo, "commit", "-m", "init"],
+      {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "code-agent-sdk-test",
+          GIT_AUTHOR_EMAIL: "code-agent-sdk@example.com",
+          GIT_COMMITTER_NAME: "code-agent-sdk-test",
+          GIT_COMMITTER_EMAIL: "code-agent-sdk@example.com",
+        },
+      }
+    );
 
     const result = await runAgent("demo", repo, "main", {
       orchestrator: {

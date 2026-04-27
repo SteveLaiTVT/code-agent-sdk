@@ -20,8 +20,11 @@ function task(taskId) {
     forbiddenPaths: [".env", ".git", "node_modules"],
     dependencies: [],
     acceptanceCriteria: [],
+    validationTools: [],
     verificationCommands: [],
     riskLevel: "low",
+    expectedOutputs: [],
+    notes: [],
   };
 }
 

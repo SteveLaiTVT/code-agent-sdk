@@ -154,6 +154,26 @@ export function validateTaskDAG(dag: TaskDAG): ValidationResult {
       errors.push(`Task ${task.taskId} must declare a concrete model`);
     }
 
+    if (!task.modelTier) {
+      errors.push(`Task ${task.taskId} must declare modelTier`);
+    }
+
+    if (!task.reasoningEffort) {
+      errors.push(`Task ${task.taskId} must declare reasoningEffort`);
+    }
+
+    if (!Array.isArray(task.validationTools)) {
+      errors.push(`Task ${task.taskId} must declare validationTools`);
+    }
+
+    if (!Array.isArray(task.expectedOutputs)) {
+      errors.push(`Task ${task.taskId} must declare expectedOutputs`);
+    }
+
+    if (!Array.isArray(task.notes)) {
+      errors.push(`Task ${task.taskId} must declare notes`);
+    }
+
     if (hasPathOverlap(task.writePaths, task.forbiddenPaths)) {
       errors.push(`Task ${task.taskId} writePaths overlap forbiddenPaths`);
     }

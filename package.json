@@ -42,6 +42,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
     "agent:demo": "npm run build && node dist/examples/run-demo.js",
     "test": "npm run build && node --test test/*.test.mjs"
   },

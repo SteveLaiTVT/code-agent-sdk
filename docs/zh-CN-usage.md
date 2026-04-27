@@ -128,6 +128,77 @@ console.log(result.modelUsage.byModel);
 `stream.events` 是异步迭代器，适合边运行边渲染。`stream.result` 是最终结果的
 Promise，适合在任务结束后落库、生成报告或更新 PR 评论。
 
+### Plan 审核模式
+
+Plan 审核是显式开启的模式。开启后，orchestrator 会先让 planner 生成并校验
+`TaskDAG`，然后发出 `plan.review.required`，在调用端放行之前不会启动 worker、
+merge、verification 或 review。
+
+```ts
+const stream = await runCodingTaskStreamed(
+  "重构设置页。",
+  "/path/to/target-repo",
+  "main",
+  {
+    orchestrator: {
+      planReview: { mode: "manual" },
+    },
+  },
+);
+
+for await (const event of stream.events) {
+  if (event.type === "plan.review.required") {
+    renderPlan(event.dag, event.options);
+    stream.planReview?.approve();
+  }
+}
+```
+
+`stream.planReview` 提供 `approve()`、`revise(feedback)` 和 `cancel(reason)`。
+`revise()` 会把反馈交回 planner 重新生成 DAG，并再次进入审核；`cancel()` 会以
+`status: "cancelled"` 结束 run，不创建任务工作区、不应用 patch。manual 模式不能用
+非流式 API，因为普通 Promise 没有 controller。
+
+### Pre-Merge Validation
+
+实现任务的 patch 会先在临时 validation workspace 里验证，验证通过后才 merge 到目标
+项目。SDK 不假设项目一定是 Node，也不假设是 Android、iOS、Flutter 或 Web。planner
+需要在每个 task 上设置 `validationTools` 和 `verificationCommands`，SDK 只负责在
+validation workspace 里执行这些 task-level 命令。开启 pre-merge validation 时，
+`verificationCommands` 会被视为 patch 级门禁，不会在 merge 后把同一组命令再自动重跑。
+如果你需要仓库级的 merge 后验证，请显式添加 verifier task 或
+`fullVerificationCommands`。调用端也可以加更严格的全局命令：
+
+```ts
+const stream = await runCodingTaskStreamed(message, repo, "main", {
+  orchestrator: {
+    preMergeValidation: {
+      commands: ["npm run build"],
+    },
+  },
+});
+```
+
+如果 pre-merge validation 失败，当前 task 会失败，patch 不会进入目标项目。事件流会发出
+`task.validation.completed`，里面带具体命令结果。
+
+### 什么时候走 direct Codex，什么时候走 plan-mode
+
+如果你更在乎速度而不是编排结构，可以直接走 Codex，方式可以是
+`runSingleCodexTask()`，也可以直接使用 `@openai/codex-sdk`。如果你需要任务边界、审核
+卡点和可追踪产物，就走完整的 plan-mode。
+
+| 路由 | 适合场景 | 原因 |
+| --- | --- | --- |
+| direct Codex | 单文件修改、快速排查 Bug、prompt 探路、小型重构、一次性文档或测试补丁 | 开销最低，反馈最快 |
+| plan-mode | 多文件 Bug、风险较高的重构、共享基础设施、公共 API 变更、构建/配置改动、安全敏感任务 | 有 DAG 规划、写路径约束、pre-merge validation、review 和可回放 trace |
+
+一个实用默认策略：
+
+- 大概率只改 1 到 2 个文件，且不需要人工审批或审计产物时，先走 direct Codex。
+- 涉及跨模块改动、需要人工看 plan，或需要留下可验证 patch / review 轨迹时，走 plan-mode。
+- 数据迁移、构建工具链、共享库契约、权限/鉴权/安全逻辑，以及需要结构化排查的回归问题，直接硬路由到 plan-mode。
+
 ## 5. 事件类型
 
 流式 API 会发出这些事件：
@@ -138,9 +209,14 @@ Promise，适合在任务结束后落库、生成报告或更新 PR 评论。
 | `planner.started` | planner 线程即将运行。 |
 | `planner.completed` | planner 生成了 `TaskDAG`。 |
 | `planner.failed` | planner 失败，未生成可用 DAG。 |
+| `plan.review.required` | 等待调用端审核当前 plan。 |
+| `plan.review.approved` | 调用端批准了当前 plan。 |
+| `plan.review.revision_requested` | 调用端要求 planner 按反馈重新出 plan。 |
+| `plan.review.cancelled` | 调用端在实现前取消了本次 run。 |
 | `task.started` | worker、verifier 或 reviewer 任务开始。 |
 | `task.completed` | 任务成功完成。 |
 | `task.failed` | 任务失败。 |
+| `task.validation.completed` | 某个 worker patch 的 pre-merge validation 完成。 |
 | `merge.completed` | merge broker 完成 patch 校验和应用。 |
 | `verification.completed` | 一组验证命令执行完成。 |
 | `review.completed` | reviewer 生成结构化报告。 |
@@ -163,7 +239,7 @@ Promise，适合在任务结束后落库、生成报告或更新 PR 评论。
 
 | 字段 | 说明 |
 | --- | --- |
-| `status` | 最终状态：`pass`、`needs_changes`、`reject`、`failed`。 |
+| `status` | 最终状态：`pass`、`needs_changes`、`reject`、`failed`、`cancelled`。 |
 | `dag` | planner 生成的任务图。 |
 | `taskResults` | worker 和 verifier 的执行结果。 |
 | `mergeResults` | patch 校验和合并结果。 |
@@ -204,14 +280,19 @@ interface TaskContract {
   title: string;
   role: AgentRole;
   model: string;
+  modelTier: ModelTier;
+  reasoningEffort: ReasoningEffort;
   objective: string;
   readPaths: string[];
   writePaths: string[];
   forbiddenPaths: string[];
   dependencies: string[];
   acceptanceCriteria: string[];
+  validationTools: string[];
   verificationCommands: string[];
   riskLevel: "low" | "medium" | "high" | "critical";
+  expectedOutputs: string[];
+  notes: string[];
 }
 ```
 
@@ -221,13 +302,18 @@ interface TaskContract {
 | --- | --- |
 | `role` | 决定这个任务由 planner、component worker、layout worker、screen worker、verifier、reviewer 或 merge broker 负责。 |
 | `model` | planner 为该任务选择的具体模型。 |
+| `modelTier` | 任务所属的模型层级，例如 `spark`、`mini`、`gpt-5.5`、`program`。 |
+| `reasoningEffort` | 该任务预期的推理强度。 |
 | `readPaths` | worker 可以阅读的路径。 |
 | `writePaths` | worker 被允许修改的路径。 |
 | `forbiddenPaths` | 明确禁止访问或修改的路径。 |
 | `dependencies` | 当前任务依赖的上游任务。 |
 | `acceptanceCriteria` | 完成标准。 |
+| `validationTools` | planner 选择的验证工具，例如 `gradle`、`xcodebuild`、`flutter`、`npm` 或项目脚本。 |
 | `verificationCommands` | 该任务相关的验证命令。 |
 | `riskLevel` | 风险等级，用于调度和 review 策略。 |
+| `expectedOutputs` | 预期产物路径或报告路径，没有就传空数组。 |
+| `notes` | planner 给该任务附加的结构化备注，没有就传空数组。 |
 
 编排器会校验 DAG、检查路径范围、按依赖顺序运行任务，并避免把有写路径冲突的任务放
 进同一个并行批次。
@@ -336,9 +422,9 @@ Mock 模式会返回固定的任务卡片 DAG、确定性的 worker 结果和结
 1. 为任务创建隔离 workspace。
 2. worker 在 workspace 中执行。
 3. 从 workspace 生成 patch。
-4. 根据 `TaskContract.writePaths` 校验 patch 改动范围。
-5. 校验通过后把 patch 应用到目标项目。
-6. 执行任务级和全量验证命令。
+4. 在临时 validation workspace 里先跑任务级 pre-merge validation。
+5. 根据 `TaskContract.writePaths` 校验 patch 改动范围，所有门禁通过后再把 patch 应用到目标项目。
+6. 执行显式 verifier task 或全量验证命令。
 7. 执行 reviewer 并聚合 review 结果。
 
 workspace 默认位于 `.agent-orchestrator/` 下。目标仓库应该忽略这个目录，除非你希望

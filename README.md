@@ -124,6 +124,83 @@ The stream exposes orchestration-level events and raw Codex SDK thread events.
 This is useful when the caller needs a replayable trace for each planner,
 worker, and reviewer thread.
 
+### Manual Plan Review
+
+Manual plan review is opt-in. When enabled, the orchestrator validates the
+planner's `TaskDAG`, emits `plan.review.required`, and waits before starting
+workers, merge, verification, or review.
+
+```ts
+const stream = await runCodingTaskStreamed(
+  "Refactor the settings screen.",
+  "/path/to/target-repo",
+  "main",
+  {
+    orchestrator: {
+      planReview: { mode: "manual" },
+    },
+  },
+);
+
+for await (const event of stream.events) {
+  if (event.type === "plan.review.required") {
+    renderPlan(event.dag, event.options);
+    stream.planReview?.approve();
+  }
+}
+```
+
+The controller supports `approve()`, `revise(feedback)`, and `cancel(reason)`.
+`revise()` sends feedback back to the planner and emits a new
+`plan.review.required` event for the revised DAG. `cancel()` completes the run
+with `status: "cancelled"` and does not create task workspaces or apply patches.
+Non-streamed APIs reject manual plan review because they cannot expose the
+controller.
+
+### Pre-Merge Validation
+
+Implementation patches are validated before they are merged into the target
+project. The SDK does not assume Node, Android, iOS, Flutter, or any other
+platform. The planner must set each task's `validationTools` and
+`verificationCommands`; those task-level commands run in a temporary validation
+workspace. When pre-merge validation is enabled, the SDK treats
+`verificationCommands` as patch-level gates and does not replay the same
+commands after merge. Use explicit verifier tasks or
+`fullVerificationCommands` for repo-wide post-merge checks. The caller can add
+extra global commands for stricter gates:
+
+```ts
+const stream = await runCodingTaskStreamed(message, repo, "main", {
+  orchestrator: {
+    preMergeValidation: {
+      commands: ["npm run build"],
+    },
+  },
+});
+```
+
+If pre-merge validation fails, the task fails and the patch is not merged into
+the project. The stream emits `task.validation.completed` with the command
+results.
+
+### When To Use Direct Codex vs Plan Mode
+
+Use direct Codex, either through `runSingleCodexTask()` or plain
+`@openai/codex-sdk`, when speed matters more than orchestration structure.
+Route to full plan mode when you need task boundaries, approval gates, or
+artifact-quality traceability.
+
+| Route | Best for | Why |
+| --- | --- | --- |
+| Direct Codex | Single-file edits, quick bug triage, prompt exploration, tiny refactors, one-shot docs or tests | Lowest overhead and fastest feedback loop |
+| Plan mode | Multi-file bugs, risky refactors, shared infra, public API changes, build/config work, security-sensitive tasks | Gives you DAG planning, scoped writes, pre-merge validation, review, and replayable trace |
+
+Practical default:
+
+- Start with direct Codex when the request likely stays within 1 to 2 files and does not need manual approval or audit artifacts.
+- Route to plan mode when the task spans modules, needs human plan approval, or should leave a verifiable patch/review trail.
+- Hard-route to plan mode for migrations, build tooling changes, shared library contracts, auth/security logic, and regressions that need structured debugging.
+
 ## Public API
 
 | API | Purpose |
@@ -216,8 +293,8 @@ interface TaskDAG {
 ```
 
 Each `TaskContract` defines the worker role, model, file scope, dependencies,
-acceptance criteria, verification commands, and risk level for one unit of
-work.
+acceptance criteria, validation tools, verification commands, and risk level for
+one unit of work.
 
 ```ts
 interface TaskContract {
@@ -225,14 +302,19 @@ interface TaskContract {
   title: string;
   role: AgentRole;
   model: string;
+  modelTier: ModelTier;
+  reasoningEffort: ReasoningEffort;
   objective: string;
   readPaths: string[];
   writePaths: string[];
   forbiddenPaths: string[];
   dependencies: string[];
   acceptanceCriteria: string[];
+  validationTools: string[];
   verificationCommands: string[];
   riskLevel: "low" | "medium" | "high" | "critical";
+  expectedOutputs: string[];
+  notes: string[];
 }
 ```
 
@@ -247,7 +329,7 @@ comment, or build artifact.
 
 | Field | Description |
 | --- | --- |
-| `status` | Final status: `pass`, `needs_changes`, `reject`, or `failed`. |
+| `status` | Final status: `pass`, `needs_changes`, `reject`, `failed`, or `cancelled`. |
 | `dag` | The planner-produced `TaskDAG`. |
 | `taskResults` | Worker and verifier results. |
 | `mergeResults` | Patch validation and merge results. |
@@ -274,9 +356,14 @@ The streamed API emits these event families:
 | `planner.started` | Planner thread is about to run. |
 | `planner.completed` | Planner produced a `TaskDAG`. |
 | `planner.failed` | Planner failed before a valid DAG was produced. |
+| `plan.review.required` | Plan review is waiting for caller approval, revision, or cancellation. |
+| `plan.review.approved` | Caller approved the current plan revision. |
+| `plan.review.revision_requested` | Caller requested a revised plan with feedback. |
+| `plan.review.cancelled` | Caller cancelled before implementation started. |
 | `task.started` | A worker, verifier, or reviewer task started. |
 | `task.completed` | A task completed successfully. |
 | `task.failed` | A task failed. |
+| `task.validation.completed` | Pre-merge validation finished for a worker patch. |
 | `merge.completed` | Merge broker completed patch validation and apply for a task. |
 | `verification.completed` | Verification command group completed. |
 | `review.completed` | Reviewer produced a structured report. |
@@ -304,9 +391,9 @@ The flow is:
 1. create an isolated task workspace
 2. run the worker in that workspace
 3. generate a patch from the worker workspace
-4. validate changed files against `TaskContract.writePaths`
-5. apply the patch to the target project only after validation succeeds
-6. run configured verification
+4. run task-level pre-merge validation in a temporary validation workspace
+5. validate changed files against `TaskContract.writePaths` and apply the patch only after all gates pass
+6. run explicit verifier tasks or configured full verification
 7. run reviewers
 
 Generated workspaces live under `.agent-orchestrator/`. Keep this path ignored

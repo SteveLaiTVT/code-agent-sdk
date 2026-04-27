@@ -19,8 +19,11 @@ function task(overrides = {}) {
     forbiddenPaths: [".env", ".git", "node_modules"],
     dependencies: [],
     acceptanceCriteria: [],
+    validationTools: [],
     verificationCommands: [],
     riskLevel: "low",
+    expectedOutputs: [],
+    notes: [],
     ...overrides,
   };
 }
