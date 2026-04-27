@@ -1,17 +1,32 @@
 # Code Agent SDK
 
-Experimental TypeScript SDK for orchestrating coding work across multiple model tiers and agent roles.
+Experimental TypeScript SDK for orchestrating coding work across multiple model
+tiers and agent roles.
 
-The core idea is to treat a coding request as a planned workflow instead of a single model call:
+The SDK treats a coding request as a planned workflow instead of a single model
+call. A planner produces a `TaskDAG`, specialized workers implement scoped
+pieces in isolated workspaces, a merge broker validates patches, verifiers run
+commands, reviewers inspect the result, and the caller receives both the final
+result and the raw thread-level trace.
 
-1. a planner turns the user message into a `TaskDAG`
-2. Spark workers implement small pure functions and pure components in parallel
-3. mini workers compose layout-level pieces
-4. GPT-5.5 workers handle screen-level or cross-cutting logic
-5. a merge broker validates patches before applying them
-6. verifiers and reviewers check the final result without directly editing source
+This package is intended for developer tools, internal coding platforms, CI
+assistants, and agent runners that need to show how a coding task was planned,
+executed, verified, and reviewed.
 
-This project is early-stage infrastructure. The mock runner is useful for local validation, while the adapter boundary is designed for real Codex SDK or OpenAI API integration.
+Chinese documentation is available at
+[docs/zh-CN-usage.md](https://github.com/SteveLaiTVT/code-agent-sdk/blob/main/docs/zh-CN-usage.md).
+
+## Status
+
+This project is early-stage infrastructure. The public API is usable, but the
+orchestration model is still evolving.
+
+- Package name: `@steve-life/code-agent-sdk`
+- Runtime: Node.js 18 or newer
+- Language: TypeScript, ESM
+- Primary integration boundary: `ModelRunner`
+- Real model adapter: `CodexModelRunnerAdapter`
+- Local deterministic mode: `MockModelRunner`
 
 ## Install
 
@@ -19,9 +34,22 @@ This project is early-stage infrastructure. The mock runner is useful for local 
 npm install @steve-life/code-agent-sdk
 ```
 
-Node.js 18 or newer is required.
+The SDK expects the target project to be a Git repository. Real Codex-backed
+runs also require the authentication and environment expected by
+`@openai/codex-sdk`.
+
+For local SDK development:
+
+```sh
+git clone https://github.com/SteveLaiTVT/code-agent-sdk.git
+cd code-agent-sdk
+npm install
+npm test
+```
 
 ## Quick Start
+
+Use `runCodingTask()` when you only need the final orchestration result.
 
 ```ts
 import { runCodingTask } from "@steve-life/code-agent-sdk";
@@ -34,46 +62,256 @@ const result = await runCodingTask(
 
 console.log(result.status);
 console.log(result.summary);
+console.log(result.modelUsage.totals);
 ```
 
-For UIs that need to render the orchestration process, use the streamed API:
+`runCodingTask(message, repo, branch, options?)` will:
+
+1. verify that `repo` is a Git repository
+2. fetch `origin/<branch>` when possible
+3. check out `branch`
+4. create a `ProjectSpace`
+5. run the orchestrator with a real `CodexModelRunnerAdapter`
+6. return an `OrchestrationResult`
+
+Run this against a clean working tree when possible. The SDK can apply patches
+to the target repo after merge validation succeeds.
+
+## Streamed Runs
+
+Use `runCodingTaskStreamed()` when a UI, CLI, dashboard, or log collector needs
+to render the process while it is running.
 
 ```ts
 import { runCodingTaskStreamed } from "@steve-life/code-agent-sdk";
 
 const stream = await runCodingTaskStreamed(
-  "Build a playable snake game. Put pure game logic in small functions.",
+  "Add a task board screen with loading, empty, and error states.",
   "/path/to/target-repo",
   "main",
 );
 
 for await (const event of stream.events) {
-  if (event.type === "thread.event") {
-    console.log(event.threadRunId, event.model, event.sdkEvent);
+  switch (event.type) {
+    case "run.started":
+      console.log("run", event.runId, event.project.root);
+      break;
+    case "planner.completed":
+      console.log("planned tasks", event.dag.tasks.length);
+      break;
+    case "task.started":
+      console.log("task", event.task.taskId, event.workerId);
+      break;
+    case "thread.event":
+      console.log("thread", event.threadRunId, event.model, event.sdkEvent.type);
+      break;
+    case "model.usage":
+      console.log("usage", event.model, event.usage);
+      break;
+    case "run.completed":
+    case "run.failed":
+      console.log(event.result.status, event.result.summary);
+      break;
   }
 }
 
 const result = await stream.result;
-console.log(result.modelUsage);
+console.log(result.trace);
+console.log(result.modelUsage.byModel);
 ```
 
-For a direct single-thread Codex baseline, use `runSingleCodexTask()`.
+The stream exposes orchestration-level events and raw Codex SDK thread events.
+This is useful when the caller needs a replayable trace for each planner,
+worker, and reviewer thread.
+
+## Public API
+
+| API | Purpose |
+| --- | --- |
+| `runCodingTask(message, repo, branch, options?)` | Run a real Codex-backed orchestration and return the final result. |
+| `runCodingTaskStreamed(message, repo, branch, options?)` | Run a real Codex-backed orchestration and expose events while it runs. |
+| `test(message, repo, branch, options?)` | Alias for `runCodingTask()`. |
+| `runSingleCodexTask(message, repo, branch)` | Run one direct Codex thread as a baseline. |
+| `AgentOrchestrator` | Low-level orchestrator class for custom model runners and workspace policies. |
+| `MockModelRunner` | Deterministic local model runner for tests and demos. |
+| `CodexModelRunnerAdapter` | Real adapter backed by `@openai/codex-sdk`. |
+| `WorkspaceManager` | Creates task and review workspaces. |
+| `MergeBroker` | Validates and applies worker patches. |
+| `ReviewAggregator` | Aggregates reviewer output into a final status. |
+| `createCodexOptions` | Builds role-aware sandbox and tool-permission options. |
+
+The package also exports core types such as `TaskContract`, `TaskDAG`,
+`ProjectSpace`, `TaskScope`, `WorkerResult`, `ReviewResult`,
+`OrchestrationEvent`, `ThreadRunTrace`, `ModelUsageSummary`, and
+`OrchestrationResult`.
+
+## Options
+
+```ts
+import { runCodingTask } from "@steve-life/code-agent-sdk";
+
+const result = await runCodingTask(
+  "Refactor the settings page into smaller components.",
+  "/path/to/target-repo",
+  "main",
+  {
+    projectId: "settings-refactor",
+    modelConfig: {
+      plannerModel: "gpt-5.5",
+      componentWorkerModel: "gpt-5.3-codex-spark",
+      layoutWorkerModel: "gpt-5.4-mini",
+      screenWorkerModel: "gpt-5.5",
+      reviewerModel: "gpt-5.5",
+    },
+    orchestrator: {
+      maxSparkWorkers: 4,
+      maxMiniWorkers: 2,
+      maxGpt55Workers: 1,
+      fullVerificationCommands: ["npm test"],
+    },
+  },
+);
+```
+
+`RunCodingTaskOptions` fields:
+
+| Field | Description |
+| --- | --- |
+| `projectId` | Optional stable identifier for the target project. Defaults to the repo directory name. |
+| `modelConfig` | Model names used by `CodexModelRunnerAdapter`. |
+| `orchestrator` | Partial `AgentOrchestratorOptions` for concurrency, verification, custom model runners, and workspace policies. |
+
+`runCodingTask()` defaults to real Codex-backed execution. If you want a fully
+deterministic local run, instantiate `AgentOrchestrator` with `MockModelRunner`
+or use the local demo.
 
 ## Orchestration Model
 
-The SDK separates responsibility by role:
+The SDK separates responsibility by role.
 
 | Role | Default tier | Responsibility |
 | --- | --- | --- |
-| `planner` | GPT-5.5 xhigh | Understand the requirement, produce `TaskDAG`, contracts, ownership, and review plan |
-| `component-worker` | Spark | Implement low-risk pure functions, pure components, validators, formatters, and mappers |
-| `layout-worker` | mini | Compose cards, grids, drawers, dialogs, loading, empty, and error UI |
-| `screen-worker` | GPT-5.5 high/medium | Implement screen logic, state coordination, routing, permissions, and data loading |
-| `reviewer` | GPT-5.5 high/xhigh | Review code and reports without directly modifying source |
-| `verifier` | program | Run lint, typecheck, tests, builds, and smoke checks |
-| `merge-broker` | program | Validate, merge, and verify worker patches |
+| `planner` | GPT-5.5 xhigh | Understand the request and produce a `TaskDAG` with contracts, ownership, dependencies, models, and review plan. |
+| `component-worker` | Spark | Implement low-risk pure functions, pure components, validators, formatters, and mappers. |
+| `layout-worker` | mini | Compose layout-level pieces such as cards, grids, drawers, dialogs, loading states, empty states, and error states. |
+| `screen-worker` | GPT-5.5 high/medium | Implement screen logic, state coordination, routing, permissions, data loading, and cross-cutting integration. |
+| `verifier` | program | Run lint, typecheck, tests, builds, and smoke checks. |
+| `reviewer` | GPT-5.5 high/xhigh | Review code and reports without directly editing source. |
+| `merge-broker` | program | Validate, merge, and verify worker patches. |
 
-Workers never edit the main project root directly. Implementation workers run in isolated workspaces or git worktrees, emit patches, and let `MergeBroker` validate and apply those patches.
+The planner decides the concrete `task.model` for each task. Model usage is
+then collected from streamed thread events and summarized by model in the final
+`OrchestrationResult`.
+
+## TaskDAG And Task Contracts
+
+A planner returns a `TaskDAG`.
+
+```ts
+interface TaskDAG {
+  dagId: string;
+  tasks: TaskContract[];
+  edges: TaskDAGEdge[];
+}
+```
+
+Each `TaskContract` defines the worker role, model, file scope, dependencies,
+acceptance criteria, verification commands, and risk level for one unit of
+work.
+
+```ts
+interface TaskContract {
+  taskId: string;
+  title: string;
+  role: AgentRole;
+  model: string;
+  objective: string;
+  readPaths: string[];
+  writePaths: string[];
+  forbiddenPaths: string[];
+  dependencies: string[];
+  acceptanceCriteria: string[];
+  verificationCommands: string[];
+  riskLevel: "low" | "medium" | "high" | "critical";
+}
+```
+
+The orchestrator validates the DAG, checks task scope safety, runs ready tasks
+in dependency order, and avoids running overlapping write scopes in the same
+parallel batch.
+
+## Result Shape
+
+`OrchestrationResult` is the durable output to store in a database, job log, PR
+comment, or build artifact.
+
+| Field | Description |
+| --- | --- |
+| `status` | Final status: `pass`, `needs_changes`, `reject`, or `failed`. |
+| `dag` | The planner-produced `TaskDAG`. |
+| `taskResults` | Worker and verifier results. |
+| `mergeResults` | Patch validation and merge results. |
+| `verificationResults` | Command-level verification output. |
+| `reviewResults` | Structured reviewer reports. |
+| `trace` | Replayable thread traces grouped by planner, worker, and reviewer run. |
+| `modelUsage` | Token and turn counts grouped by model plus totals. |
+| `summary` | Human-readable summary of the run. |
+
+`modelUsage` has both `byModel` and `totals`.
+
+```ts
+console.log(result.modelUsage.byModel["gpt-5.5"]);
+console.log(result.modelUsage.totals.outputTokens);
+```
+
+## Stream Event Reference
+
+The streamed API emits these event families:
+
+| Event | Description |
+| --- | --- |
+| `run.started` | A new orchestration run started. |
+| `planner.started` | Planner thread is about to run. |
+| `planner.completed` | Planner produced a `TaskDAG`. |
+| `planner.failed` | Planner failed before a valid DAG was produced. |
+| `task.started` | A worker, verifier, or reviewer task started. |
+| `task.completed` | A task completed successfully. |
+| `task.failed` | A task failed. |
+| `merge.completed` | Merge broker completed patch validation and apply for a task. |
+| `verification.completed` | Verification command group completed. |
+| `review.completed` | Reviewer produced a structured report. |
+| `thread.event` | Raw streamed Codex SDK event for a planner, worker, or reviewer thread. |
+| `model.usage` | Usage extracted from a completed turn. |
+| `run.completed` | Run completed with a non-failed result. |
+| `run.failed` | Run completed in failed state. |
+
+When building a UI, render `thread.event` for detailed timeline visibility and
+use higher-level events for task status, DAG visualization, and summary panels.
+
+## Workspace And Merge Flow
+
+Implementation workers do not edit the main project root directly.
+
+The default `runCodingTask()` path uses:
+
+- `WorkspaceManager({ strategy: "git-worktree", keepWorkspaces: true })`
+- `MergeBroker`
+- `CodexModelRunnerAdapter`
+- `executeVerificationCommands: true`
+
+The flow is:
+
+1. create an isolated task workspace
+2. run the worker in that workspace
+3. generate a patch from the worker workspace
+4. validate changed files against `TaskContract.writePaths`
+5. apply the patch to the target project only after validation succeeds
+6. run configured verification
+7. run reviewers
+
+Generated workspaces live under `.agent-orchestrator/`. Keep this path ignored
+in target repositories unless you intentionally want to inspect saved
+workspaces.
 
 ## Permission Model
 
@@ -83,16 +321,51 @@ Permissions are derived from:
 AgentRole + ProjectSpace + TaskScope
 ```
 
-There is no `projectType` switch. File access is path-scoped and every path is checked against `ProjectSpace.root`.
+There is no `projectType` switch. File access is path-scoped and every path is
+checked against `ProjectSpace.root`.
 
 Network permissions are modeled separately:
 
-- `shellNetwork`: command-level network access such as `curl`, `npm install`, `git clone`, `wget`
+- `shellNetwork`: command-level network access such as `curl`, `npm install`,
+  `git clone`, or `wget`
 - `webSearch`: controlled web search or documentation lookup
 - `mcpRead`: read-only MCP access such as GitHub, Slack, Jira, or docs
-- `mcpWrite`: side-effecting MCP access such as PR creation, issue updates, or messages
+- `mcpWrite`: side-effecting MCP access such as PR creation, issue updates, or
+  messages
 
-Only `shellNetwork` maps to Codex sandbox network access. Tool permissions such as `webSearch`, `mcpRead`, and `mcpWrite` stay at the orchestration layer.
+Only `shellNetwork` maps to Codex sandbox network access. Tool permissions such
+as `webSearch`, `mcpRead`, and `mcpWrite` stay at the orchestration layer.
+
+## Mock Runner
+
+The mock runner is useful for tests, demos, and local integration work when you
+do not want to call real models.
+
+```ts
+import {
+  AgentOrchestrator,
+  MockModelRunner,
+  type ProjectSpace,
+} from "@steve-life/code-agent-sdk";
+
+const project: ProjectSpace = {
+  projectId: "demo",
+  root: process.cwd(),
+};
+
+const orchestrator = new AgentOrchestrator({
+  modelRunner: new MockModelRunner(),
+  executeVerificationCommands: false,
+});
+
+const result = await orchestrator.run(
+  "Implement a task-card UI workflow.",
+  project,
+);
+```
+
+The mock planner returns a fixed task-card DAG, mock workers return deterministic
+patch metadata, and mock reviewers return structured pass reports.
 
 ## Local Demo
 
@@ -110,33 +383,9 @@ The demo:
 - runs mock verification
 - aggregates contract, integration, architecture, and security review reports
 
-## Test
-
-```sh
-npm test
-```
-
-## Public API
-
-Common entry points:
-
-- `runCodingTask(message, repo, branch, options?)`
-- `runCodingTaskStreamed(message, repo, branch, options?)`
-- `test(message, repo, branch, options?)`
-- `runSingleCodexTask(message, repo, branch)`
-- `AgentOrchestrator`
-- `MockModelRunner`
-- `CodexModelRunnerAdapter`
-- `WorkspaceManager`
-- `MergeBroker`
-- `ReviewAggregator`
-- `createCodexOptions`
-
-The package also exports core types such as `TaskContract`, `TaskDAG`, `ProjectSpace`, `TaskScope`, `WorkerResult`, `ReviewResult`, and `OrchestrationResult`.
-
 ## Real Model Integration
 
-The adapter boundary is `ModelRunner`:
+The adapter boundary is `ModelRunner`.
 
 ```ts
 export interface ModelRunner {
@@ -146,15 +395,13 @@ export interface ModelRunner {
 }
 ```
 
-Use `CodexModelRunnerAdapter` for real Codex SDK execution. The mock runner still uses JSON patch fixtures for deterministic tests and demos; real adapters should run in isolated workspaces and return real patch paths.
+Use `CodexModelRunnerAdapter` for real Codex SDK execution. The adapter starts
+Codex threads for the planner, workers, and reviewers, consumes
+`thread.runStreamed()`, forwards raw thread events into the orchestration
+stream, and returns model usage from completed turns.
 
-## Current Mocked Parts
-
-- `MockModelRunner` returns a fixed task-card `TaskDAG`.
-- Mock workers can return JSON patch files instead of real model edits.
-- Workspace management supports mock copy mode and a git-worktree strategy boundary.
-- Verification commands can be mocked unless `executeVerificationCommands` is enabled.
-- Review workers return structured mock review reports unless backed by a real `ModelRunner`.
+Custom adapters can implement the same interface for other model providers,
+internal routing layers, or offline test harnesses.
 
 ## Development
 
@@ -170,6 +417,30 @@ Before publishing:
 npm run build
 npm pack --dry-run
 ```
+
+## Current Mocked Or Experimental Parts
+
+- `MockModelRunner` returns a fixed task-card `TaskDAG`.
+- Mock workers can return JSON patch files instead of real model edits.
+- Workspace management supports mock copy mode and a git-worktree strategy
+  boundary.
+- Verification commands can be mocked unless `executeVerificationCommands` is
+  enabled.
+- Review workers return structured mock review reports unless backed by a real
+  `ModelRunner`.
+- The orchestration API is still experimental and may change before a stable
+  release.
+
+## Operational Notes
+
+- Run against a clean target repository when possible.
+- `runCodingTask()` may check out the requested branch in the target repo.
+- Real workers run with `networkAccessEnabled: false` by default.
+- Planner and reviewer behavior depends on the configured model and adapter.
+- Store `result.trace` and `result.modelUsage` if you need auditability,
+  replay, or cost reporting.
+- Prefer the streamed API for user-facing products so callers can see planning,
+  execution, verification, review, and raw thread progress.
 
 ## License
 
