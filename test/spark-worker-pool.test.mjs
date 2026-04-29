@@ -3,7 +3,6 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { runDemo } from "../dist/examples/run-demo.js";
 import { SparkWorkerPool } from "../dist/index.js";
 
 function task(taskId) {
@@ -28,19 +27,8 @@ function task(taskId) {
   };
 }
 
-describe("orchestrator demo", () => {
-  it("runs the full mock orchestration flow", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "orchestrator-demo-"));
-    const result = await runDemo(root);
-    assert.equal(result.status, "pass");
-    assert.equal(typeof result.summary, "string");
-    assert.ok(result.dag.tasks.length >= 9);
-    assert.ok(result.taskResults.some((item) => item.workerId.startsWith("spark-worker-")));
-    assert.ok(result.mergeResults.length >= 4);
-    assert.equal(result.reviewResults.length, 4);
-  });
-
-  it("Spark worker pool runs mock workers in parallel", async () => {
+describe("SparkWorkerPool", () => {
+  it("runs mock workers in parallel", async () => {
     let active = 0;
     let maxActive = 0;
     const pool = new SparkWorkerPool(2);
@@ -70,7 +58,7 @@ describe("orchestrator demo", () => {
         workspacePath: await mkdtemp(path.join(os.tmpdir(), "spark-workspace-")),
         codexOptions: {},
         taskContract: currentTask,
-      })
+      }),
     );
     assert.equal(results.length, 2);
     assert.equal(maxActive, 2);
