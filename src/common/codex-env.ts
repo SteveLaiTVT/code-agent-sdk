@@ -38,7 +38,14 @@ export function createCodexClientOptions(options: CodexEnvOptions = {}): CodexOp
   loadDotEnv({ cwd: options.cwd, env });
 
   const apiKey = processApiKey ?? firstNonEmpty(env.OPENAI_API_KEY, env.OPENAI_KEY);
-  const baseUrl = processBaseUrl;
+  const baseUrl =
+    processBaseUrl ??
+    firstNonEmpty(
+      env.OPENAI_API_BSSE_URL,
+      env.OPENAI_API_BASE_URL,
+      env.OPENAI_BASE_URL,
+      env.OPENAI_URL,
+    );
   const codexOptions: CodexOptions = {};
 
   if (apiKey) {

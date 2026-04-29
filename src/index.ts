@@ -15,8 +15,11 @@ import { MergeBroker } from "./merge/merge-broker.js";
 const execFileAsync = promisify(execFile);
 
 export interface RunCodingTaskOptions {
+  /** Stable id used in traces and reports. Defaults to the repo directory name. */
   projectId?: string;
+  /** Concrete model names used by the real Codex-backed planner, workers, and reviewers. */
   modelConfig?: Partial<CodexModelRunnerAdapterConfig>;
+  /** Orchestrator controls such as plan review, validation, concurrency, and custom adapters. */
   orchestrator?: Partial<AgentOrchestratorOptions>;
 }
 
@@ -116,6 +119,9 @@ async function ensureBranch(repo: string, branch: string): Promise<void> {
 }
 
 export { Codex, type RunResult, type Thread, type RunStreamedResult } from "@openai/codex-sdk";
+export { createCodexClientOptions, loadDotEnv, parseDotEnv } from "./common/codex-env.js";
+export * from "./task-session.js";
+export * from "./code-agent.js";
 export * from "./agents/roles.js";
 export * from "./agents/profiles.js";
 export * from "./agents/codex-options.js";
