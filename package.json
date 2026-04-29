@@ -1,6 +1,6 @@
 {
   "name": "@steve-life/code-agent-sdk",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Experimental multi-agent Codex orchestration SDK for coding workflows.",
   "license": "MIT",
   "author": "SteveLaiTVT",
