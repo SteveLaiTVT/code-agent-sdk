@@ -16,6 +16,7 @@ describe("createCodexOptions", () => {
   it("planner is read-only", async () => {
     const options = createCodexOptions({ role: "planner", project: await project() });
     assert.equal(options.config.sandbox_mode, "read-only");
+    assert.equal(options.config.sandbox_workspace_write.network_access, false);
     assert.deepEqual(options.config.sandbox_workspace_write.writable_roots, []);
   });
 
@@ -37,11 +38,41 @@ describe("createCodexOptions", () => {
   });
 
   it("reviewer blocks shell network but allows webSearch and mcpRead", async () => {
-    const options = createCodexOptions({ role: "reviewer", project: await project() });
+    const p = await project();
+    const options = createCodexOptions({ role: "reviewer", project: p });
+    assert.equal(options.config.sandbox_mode, "workspace-write");
     assert.equal(options.config.sandbox_workspace_write.network_access, false);
+    assert.deepEqual(options.config.sandbox_workspace_write.writable_roots.sort(), [
+      path.join(p.root, ".agent-orchestrator/reviews"),
+      path.join(p.root, ".agent-orchestrator/tmp"),
+    ].sort());
     assert.equal(options.toolPermissions.webSearch, true);
     assert.equal(options.toolPermissions.mcpRead, true);
     assert.equal(options.toolPermissions.mcpWrite, false);
+  });
+
+  it("keeps shell network disabled unless the task scope explicitly enables it", async () => {
+    const p = await project();
+    const defaultOptions = createCodexOptions({
+      role: "screen-worker",
+      project: p,
+      taskScope: {
+        writablePaths: ["src/screen.ts"],
+      },
+    });
+    const networkedOptions = createCodexOptions({
+      role: "screen-worker",
+      project: p,
+      taskScope: {
+        writablePaths: ["src/screen.ts"],
+        network: {
+          shellNetwork: true,
+        },
+      },
+    });
+
+    assert.equal(defaultOptions.config.sandbox_workspace_write.network_access, false);
+    assert.equal(networkedOptions.config.sandbox_workspace_write.network_access, true);
   });
 
   it("shell environment excludes secrets", async () => {

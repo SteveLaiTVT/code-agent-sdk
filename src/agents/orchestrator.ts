@@ -243,6 +243,10 @@ export class AgentOrchestrator {
         });
         plannedDag = await this.modelRunner.runPlanner(requirement, {
           project,
+          codexOptions: createCodexOptions({
+            role: "planner",
+            project,
+          }),
           telemetry: plannerTelemetry,
           planRevision,
         });
@@ -592,12 +596,16 @@ export class AgentOrchestrator {
       threadRunId,
     });
     const workspacePath = await this.workspaceManager.createTaskWorkspace(project, task);
+    const workspaceProject = {
+      ...project,
+      root: workspacePath,
+    };
     let result = await worker.run(task, {
       project,
       workspacePath,
       codexOptions: createCodexOptions({
         role: task.role,
-        project,
+        project: workspaceProject,
         taskScope: taskContractToScope(task),
       }),
       taskContract: task,
@@ -864,7 +872,10 @@ export class AgentOrchestrator {
           workspacePath,
           codexOptions: createCodexOptions({
             role: "reviewer",
-            project,
+            project: {
+              ...project,
+              root: workspacePath,
+            },
             taskScope: {
               readablePaths: task.readPaths,
               reportPaths: [".agent-orchestrator/reviews", ".agent-orchestrator/tmp"],

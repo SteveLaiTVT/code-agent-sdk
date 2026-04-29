@@ -1,5 +1,6 @@
 import type { ReviewResult } from "../review/review-types.js";
 import { emitThreadEvent } from "../core/orchestration-stream.js";
+import type { OrchestrationCodexOptions } from "./codex-options.js";
 import type {
   ModelRunTelemetry,
   PlanRevisionContext,
@@ -12,6 +13,7 @@ import type {
 export interface ModelRunnerWorkerInput {
   task: TaskContract;
   workspacePath: string;
+  codexOptions?: OrchestrationCodexOptions;
   telemetry?: ModelRunTelemetry;
 }
 
@@ -27,12 +29,14 @@ export interface ModelRunnerReviewerInput {
   reviewType: ReviewResult["reviewType"];
   project?: ProjectSpace;
   workspacePath?: string;
+  codexOptions?: OrchestrationCodexOptions;
   verification?: VerificationResult;
   telemetry?: ModelRunTelemetry;
 }
 
 export interface ModelRunnerPlannerContext {
   project?: ProjectSpace;
+  codexOptions?: OrchestrationCodexOptions;
   telemetry?: ModelRunTelemetry;
   planRevision?: PlanRevisionContext;
 }
@@ -44,7 +48,7 @@ export interface ModelRunner {
 }
 
 function generatedPath(fileName: string): string {
-  return `src/examples/generated-task-board/${fileName}`;
+  return `src/mock-task-board/${fileName}`;
 }
 
 export class MockModelRunner implements ModelRunner {

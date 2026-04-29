@@ -5,6 +5,7 @@ export function taskContractToScope(task: TaskContract): TaskScope {
     readablePaths: task.readPaths,
     writablePaths: task.writePaths,
     forbiddenPaths: task.forbiddenPaths,
+    network: task.network,
   };
 }
 

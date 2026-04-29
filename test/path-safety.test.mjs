@@ -63,4 +63,17 @@ describe("path safety", () => {
       /sensitive or generated path/
     );
   });
+
+  it("rejects .git and node_modules writes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "path-safe-"));
+    assert.throws(
+      () => assertTaskScopeSafe({ projectId: "p", root }, task({ writePaths: [".git/config"] })),
+      /sensitive or generated path/
+    );
+    assert.throws(
+      () =>
+        assertTaskScopeSafe({ projectId: "p", root }, task({ writePaths: ["node_modules/pkg.js"] })),
+      /sensitive or generated path/
+    );
+  });
 });

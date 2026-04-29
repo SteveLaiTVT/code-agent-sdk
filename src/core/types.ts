@@ -67,6 +67,7 @@ export interface TaskContract {
   riskLevel: RiskLevel;
   expectedOutputs: string[];
   notes: string[];
+  network?: Partial<NetworkPermission>;
 }
 
 export interface TaskDAGEdge {
@@ -195,20 +196,29 @@ export type PlanReviewMode = "auto" | "manual";
 export type PlanReviewAction = "approve" | "revise" | "cancel";
 
 export interface PlanReviewOption {
+  /** Machine-readable action value to pass to the UI command surface. */
   action: PlanReviewAction;
+  /** Short user-facing label, for example Approve, Revise, or Cancel. */
   label: string;
+  /** User-facing explanation of what this action does. */
   description: string;
+  /** True when the action needs user feedback text, currently used by revise. */
   requiresFeedback: boolean;
 }
 
 export interface PlanReviewConfig {
+  /** Use manual to emit plan.review.required and wait for caller approval before workers start. */
   mode: PlanReviewMode;
+  /** Optional custom action labels/descriptions for the caller UI. */
   options?: PlanReviewOption[];
 }
 
 export interface PlanReviewController {
+  /** Accept the current TaskDAG and start implementation. */
   approve(): void;
+  /** Send user feedback to the planner and wait for a revised TaskDAG. */
   revise(feedback: string): void;
+  /** End the run before implementation starts. No worker patches are created or applied. */
   cancel(reason?: string): void;
 }
 
@@ -347,7 +357,10 @@ export type OrchestrationEvent =
     });
 
 export interface OrchestrationStream {
+  /** Async event stream for UI timelines, logs, and plan-review gates. */
   events: AsyncIterable<OrchestrationEvent>;
+  /** Final orchestration result. Await this after the events are drained or after cancellation/failure. */
   result: Promise<OrchestrationResult>;
+  /** Present only when orchestrator.planReview.mode is manual. */
   planReview?: PlanReviewController;
 }

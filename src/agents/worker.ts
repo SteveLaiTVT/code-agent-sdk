@@ -1,6 +1,7 @@
 import type { ModelRunner } from "./model-runner.js";
 import { MockModelRunner } from "./model-runner.js";
 import { createMockPatchFile } from "../workspace/patch.js";
+import type { OrchestrationCodexOptions } from "./codex-options.js";
 import type {
   AgentRole,
   ModelRunTelemetry,
@@ -12,7 +13,7 @@ import type {
 export interface WorkerContext {
   project: ProjectSpace;
   workspacePath: string;
-  codexOptions: object;
+  codexOptions: OrchestrationCodexOptions;
   inputFiles?: string[];
   taskContract: TaskContract;
   telemetry?: ModelRunTelemetry;
@@ -69,6 +70,7 @@ abstract class BasePatchWorker implements AgentWorker {
       const output = await this.modelRunner.runWorker({
         task,
         workspacePath: context.workspacePath,
+        codexOptions: context.codexOptions,
         telemetry: context.telemetry,
       });
       const patchPath = output.patchPath ?? (await createMockPatchFile(context.workspacePath, task));

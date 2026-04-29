@@ -7,9 +7,10 @@ import type {
 } from "../agents/model-runner.js";
 import {
   Codex,
+  type CodexOptions,
   type Input,
   type RunResult,
-  type Thread,
+  type ThreadEvent,
   type ThreadItem,
   type ThreadOptions,
   type TurnOptions,
@@ -21,6 +22,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { emitThreadEvent } from "../core/orchestration-stream.js";
 import { createCodexClientOptions } from "../common/codex-env.js";
+import { createCodexOptions, type OrchestrationCodexOptions } from "../agents/codex-options.js";
+import { taskContractToScope } from "../core/task-contract.js";
 import type {
   AgentRole,
   ModelRunTelemetry,
@@ -41,6 +44,20 @@ export interface CodexModelRunnerAdapterConfig {
   verifierModel?: string;
 }
 
+export type CodexThreadDriver = {
+  runStreamed(input: Input, turnOptions?: TurnOptions): Promise<{ events: AsyncIterable<ThreadEvent> }>;
+};
+
+export type CodexClientDriver = {
+  startThread(options?: ThreadOptions): CodexThreadDriver;
+};
+
+export interface CodexModelRunnerAdapterRuntimeOptions {
+  codex?: CodexClientDriver;
+  createCodex?: (options: CodexOptions) => CodexClientDriver;
+  clientOptions?: CodexOptions;
+}
+
 export const defaultCodexModelRunnerAdapterConfig: CodexModelRunnerAdapterConfig = {
   plannerModel: "gpt-5.5",
   componentWorkerModel: "gpt-5.3-codex-spark",
@@ -51,14 +68,22 @@ export const defaultCodexModelRunnerAdapterConfig: CodexModelRunnerAdapterConfig
 
 export class CodexModelRunnerAdapter implements ModelRunner {
   readonly config: CodexModelRunnerAdapterConfig;
-  private readonly codex: Codex;
+  private readonly codex?: CodexClientDriver;
+  private readonly createCodex: (options: CodexOptions) => CodexClientDriver;
+  private readonly clientOptions: CodexOptions;
 
-  constructor(config: Partial<CodexModelRunnerAdapterConfig> = {}, codex = new Codex(createCodexClientOptions())) {
+  constructor(
+    config: Partial<CodexModelRunnerAdapterConfig> = {},
+    runtime: CodexClientDriver | CodexModelRunnerAdapterRuntimeOptions = {}
+  ) {
     this.config = {
       ...defaultCodexModelRunnerAdapterConfig,
       ...config,
     };
-    this.codex = codex;
+    const runtimeOptions = isCodexClientDriver(runtime) ? { codex: runtime } : runtime;
+    this.codex = runtimeOptions.codex;
+    this.createCodex = runtimeOptions.createCodex ?? ((options) => new Codex(options));
+    this.clientOptions = runtimeOptions.clientOptions ?? createCodexClientOptions();
   }
 
   async runPlanner(requirement: string, context: ModelRunnerPlannerContext = {}): Promise<TaskDAG> {
@@ -67,13 +92,16 @@ export class CodexModelRunnerAdapter implements ModelRunner {
       throw new Error("Codex planner requires ProjectSpace context.");
     }
 
-    const thread = this.codex.startThread({
+    const codexOptions =
+      context.codexOptions ??
+      createCodexOptions({
+        role: "planner",
+        project,
+      });
+    const thread = this.startThread(codexOptions, {
       model: this.config.plannerModel,
       modelReasoningEffort: "xhigh",
-      sandboxMode: "read-only",
       workingDirectory: project.root,
-      approvalPolicy: "never",
-      webSearchEnabled: false,
     });
 
     const result = await runThreadStreamed(
@@ -89,14 +117,17 @@ export class CodexModelRunnerAdapter implements ModelRunner {
 
   async runWorker(input: ModelRunnerWorkerInput): Promise<ModelRunnerWorkerOutput> {
     const model = input.task.model || this.modelForRole(input.task.role);
-    const thread = this.codex.startThread({
+    const codexOptions =
+      input.codexOptions ??
+      createCodexOptions({
+        role: input.task.role,
+        project: { projectId: input.task.taskId, root: input.workspacePath },
+        taskScope: taskContractToScope(input.task),
+      });
+    const thread = this.startThread(codexOptions, {
       model,
       modelReasoningEffort: reasoningForTask(input.task),
-      sandboxMode: "workspace-write",
       workingDirectory: input.workspacePath,
-      approvalPolicy: "never",
-      networkAccessEnabled: false,
-      webSearchEnabled: false,
     });
 
     const result = await runThreadStreamed(
@@ -122,14 +153,21 @@ export class CodexModelRunnerAdapter implements ModelRunner {
     }
 
     const model = input.task.model || this.config.reviewerModel;
-    const thread = this.codex.startThread({
+    const codexOptions =
+      input.codexOptions ??
+      createCodexOptions({
+        role: "reviewer",
+        project: { projectId: input.task.taskId, root: input.workspacePath },
+        taskScope: {
+          readablePaths: input.task.readPaths,
+          reportPaths: [".agent-orchestrator/reviews", ".agent-orchestrator/tmp"],
+          forbiddenPaths: input.task.forbiddenPaths,
+        },
+      });
+    const thread = this.startThread(codexOptions, {
       model,
       modelReasoningEffort: input.reviewType === "security" ? "xhigh" : "high",
-      sandboxMode: "workspace-write",
       workingDirectory: input.workspacePath,
-      approvalPolicy: "never",
-      networkAccessEnabled: false,
-      webSearchEnabled: false,
     });
 
     const result = await runThreadStreamed(
@@ -160,10 +198,24 @@ export class CodexModelRunnerAdapter implements ModelRunner {
         return this.config.verifierModel ?? this.config.screenWorkerModel;
     }
   }
+
+  private startThread(
+    codexOptions: OrchestrationCodexOptions,
+    threadOptions: ThreadOptions
+  ): CodexThreadDriver {
+    const codex = this.codex ?? this.createCodex(mergeCodexOptions(this.clientOptions, codexOptions));
+    return codex.startThread({
+      ...threadOptions,
+      sandboxMode: codexOptions.config.sandbox_mode,
+      approvalPolicy: codexOptions.config.approval_policy,
+      networkAccessEnabled: codexOptions.config.sandbox_workspace_write.network_access,
+      webSearchEnabled: codexOptions.toolPermissions.webSearch,
+    });
+  }
 }
 
 async function runThreadStreamed(
-  thread: Thread,
+  thread: CodexThreadDriver,
   input: Input,
   turnOptions: TurnOptions | undefined,
   telemetry: ModelRunTelemetry | undefined
@@ -207,6 +259,23 @@ async function runThreadStreamed(
   };
 }
 
+function isCodexClientDriver(value: unknown): value is CodexClientDriver {
+  return Boolean(value && typeof value === "object" && "startThread" in value);
+}
+
+function mergeCodexOptions(
+  baseOptions: CodexOptions,
+  orchestrationOptions: OrchestrationCodexOptions
+): CodexOptions {
+  return {
+    ...baseOptions,
+    config: {
+      ...(baseOptions.config ?? {}),
+      ...orchestrationOptions.config,
+    } as CodexOptions["config"],
+  };
+}
+
 function reasoningForRole(role: AgentRole): ThreadOptions["modelReasoningEffort"] {
   switch (role) {
     case "component-worker":
@@ -245,6 +314,8 @@ function createPlannerPrompt(
     "- component-worker tasks must be small and must not share writePaths with parallel component-worker tasks.",
     "- Use layout-worker tasks for presentational layout composition.",
     "- Use screen-worker tasks for state, orchestration, app wiring, routing, lifecycle, and complex integration.",
+    "- If component-worker tasks exist, every layout-worker task must directly or indirectly depend on the related component-worker tasks.",
+    "- If layout-worker tasks exist, every screen-worker task must directly or indirectly depend on a layout-worker task. Use component-worker or verifier roles for unrelated backend/data-only work instead of screen-worker.",
     "- For every task, set model to the exact model string that should run that task.",
     "- Prefer gpt-5.3-codex-spark for tiny pure component-worker tasks, gpt-5.4-mini for layout-worker tasks, and gpt-5.5 for planner/reviewer/high-risk integration tasks.",
     "- For every task, set validationTools to the project-specific validation tools that should be used, such as npm, pnpm, yarn, gradle, xcodebuild, flutter, dart, pytest, cargo, go, or custom scripts. Use an empty array only when no validation applies.",
@@ -255,7 +326,9 @@ function createPlannerPrompt(
     "- Reviewer tasks must depend on every implementation task.",
     "- Do not include projectType.",
     "- Use relative paths only.",
+    "- Never use parent traversal paths such as .., ../*, or absolute paths in readPaths, writePaths, or forbiddenPaths.",
     "- Always include model, reasoningEffort, expectedOutputs, and notes. Use empty arrays for no outputs/notes.",
+    "- Always include network. Set every network flag to false unless a task explicitly needs that access.",
     "- Avoid package.json/global config changes unless absolutely necessary.",
     "- Keep forbiddenPaths populated with .env, .git, node_modules, dist, build, .next, coverage.",
     "",
@@ -376,6 +449,18 @@ const stringArraySchema = {
   items: { type: "string" },
 };
 
+const networkPermissionSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    shellNetwork: { type: "boolean" },
+    webSearch: { type: "boolean" },
+    mcpRead: { type: "boolean" },
+    mcpWrite: { type: "boolean" },
+  },
+  required: ["shellNetwork", "webSearch", "mcpRead", "mcpWrite"],
+};
+
 const taskContractSchema = {
   type: "object",
   additionalProperties: false,
@@ -408,6 +493,7 @@ const taskContractSchema = {
     riskLevel: { type: "string", enum: ["low", "medium", "high", "critical"] },
     expectedOutputs: stringArraySchema,
     notes: stringArraySchema,
+    network: networkPermissionSchema,
   },
   required: [
     "taskId",
@@ -427,6 +513,7 @@ const taskContractSchema = {
     "riskLevel",
     "expectedOutputs",
     "notes",
+    "network",
   ],
 };
 

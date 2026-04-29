@@ -60,6 +60,7 @@ export class ReviewWorker implements AgentWorker {
       verification,
       project: context.project,
       workspacePath: context.workspacePath,
+      codexOptions: context.codexOptions,
       telemetry: context.telemetry,
     });
     const reportDir = path.join(context.workspacePath, ".agent-orchestrator", "reviews");
